@@ -8,7 +8,7 @@ let
   initNpmScript = pkgs.writeShellScript "init-npm.sh" ''
     function _devenv-npm-install()
     {
-      # Avoid running "npm install" for every shell.
+      # Avoid running "npm ci" for every shell.
       # Only run it when the "package-lock.json" file or nodejs version has changed.
       # We do this by storing the nodejs version and a hash of "package-lock.json" in node_modules.
       local ACTUAL_NPM_CHECKSUM="${cfg.npm.package.version}:$(${pkgs.nix}/bin/nix-hash --type sha256 ${lib.optionalString (cfg.directory != config.devenv.root) ''"${cfg.directory}/"''}package-lock.json)"
@@ -22,11 +22,11 @@ let
 
       if [ "$ACTUAL_NPM_CHECKSUM" != "$EXPECTED_NPM_CHECKSUM" ]
       then
-        if ${cfg.npm.package}/bin/npm install ${lib.optionalString (cfg.directory != config.devenv.root) "--prefix ${cfg.directory}"}
+        if ${cfg.npm.package}/bin/npm ci ${lib.optionalString (cfg.directory != config.devenv.root) "--prefix ${cfg.directory}"}
         then
           echo "$ACTUAL_NPM_CHECKSUM" > "$NPM_CHECKSUM_FILE"
         else
-          echo "Install failed. Run 'npm install' manually."
+          echo "Install failed. Run 'npm ci' manually."
         fi
       fi
     }
