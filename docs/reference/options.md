@@ -1493,6 +1493,156 @@ string
 
 
 
+## claude.code.mcpServers
+
+
+
+MCP (Model Context Protocol) servers to configure.
+These servers provide additional capabilities and context to Claude Code.
+
+
+
+*Type:*
+attribute set of (submodule)
+
+
+
+*Default:*
+` { } `
+
+
+
+*Example:*
+
+```
+{
+  awslabs-iam-mcp-server = {
+    type = "stdio";
+    command = lib.getExe pkgs.awslabs-iam-mcp-server;
+    args = [ ];
+    env = { };
+  };
+  linear = {
+    type = "http";
+    url = "https://mcp.linear.app/mcp";
+  };
+  devenv = {
+    type = "stdio";
+    command = "devenv";
+    args = [ "mcp" ];
+    env = {
+      DEVENV_ROOT = config.devenv.root;
+    };
+  };
+}
+
+```
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix)
+
+
+
+## claude.code.mcpServers.\<name>.args
+
+
+
+Arguments to pass to the command for stdio MCP servers.
+
+
+
+*Type:*
+list of string
+
+
+
+*Default:*
+` [ ] `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix)
+
+
+
+## claude.code.mcpServers.\<name>.command
+
+
+
+Command to execute for stdio MCP servers.
+
+
+
+*Type:*
+null or string
+
+
+
+*Default:*
+` null `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix)
+
+
+
+## claude.code.mcpServers.\<name>.env
+
+
+
+Environment variables for stdio MCP servers.
+
+
+
+*Type:*
+attribute set of string
+
+
+
+*Default:*
+` { } `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix)
+
+
+
+## claude.code.mcpServers.\<name>.type
+
+
+
+Type of MCP server connection.
+
+
+
+*Type:*
+one of “stdio”, “http”
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix)
+
+
+
+## claude.code.mcpServers.\<name>.url
+
+
+
+URL for HTTP MCP servers.
+
+
+
+*Type:*
+null or string
+
+
+
+*Default:*
+` null `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix)
+
+
+
 ## claude.code.model
 
 
@@ -1596,6 +1746,156 @@ list of string
 
 *Declared by:*
  - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix)
+
+
+
+## configurations
+
+
+
+Configurations for NixOS, home-manager, and nix-darwin.
+
+
+
+*Type:*
+attribute set of (submodule)
+
+
+
+*Default:*
+` { } `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/configurations.nix](https://github.com/cachix/devenv/blob/main/src/modules/configurations.nix)
+
+
+
+## configurations.\<name>.home-manager
+
+
+
+Home Manager configuration for the configuration.
+
+
+
+*Type:*
+null or unspecified value
+
+
+
+*Default:*
+` null `
+
+
+
+*Example:*
+
+```
+{
+  home.username = "jdoe";
+  home.homeDirectory = "/home/jdoe";
+  programs.git.enable = true;
+}
+
+```
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/configurations.nix](https://github.com/cachix/devenv/blob/main/src/modules/configurations.nix)
+
+
+
+## configurations.\<name>.nix-darwin
+
+
+
+nix-darwin configuration for the configuration.
+
+
+
+*Type:*
+null or unspecified value
+
+
+
+*Default:*
+` null `
+
+
+
+*Example:*
+
+```
+{ pkgs, ... }: {
+  environment.systemPackages = [
+    pkgs.vim
+  ];
+  services.nix-daemon.enable = true;
+}
+
+```
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/configurations.nix](https://github.com/cachix/devenv/blob/main/src/modules/configurations.nix)
+
+
+
+## configurations.\<name>.nixos
+
+
+
+NixOS configuration for the configuration.
+
+
+
+*Type:*
+null or unspecified value
+
+
+
+*Default:*
+` null `
+
+
+
+*Example:*
+
+```
+{
+  fileSystems."/".device = "/dev/sda1";
+  boot.loader.systemd-boot.enable = true;
+  services.openssh.enable = true;
+}
+
+```
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/configurations.nix](https://github.com/cachix/devenv/blob/main/src/modules/configurations.nix)
+
+
+
+## configurations.\<name>.system
+
+
+
+System architecture for the configuration.
+
+
+
+*Type:*
+string
+
+
+
+*Default:*
+` pkgs.stdenv.system `
+
+
+
+*Example:*
+` "x86_64-linux" `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/configurations.nix](https://github.com/cachix/devenv/blob/main/src/modules/configurations.nix)
 
 
 
@@ -2183,8 +2483,6 @@ null or string
 
 ## delta.enable
 
-
-
 Integrate delta into git: https://dandavison.github.io/delta/.
 
 
@@ -2420,7 +2718,7 @@ string
 
 
 *Default:*
-` "1.8.2" `
+` "1.9" `
 
 *Declared by:*
  - [https://github.com/cachix/devenv/blob/main/src/modules/update-check.nix](https://github.com/cachix/devenv/blob/main/src/modules/update-check.nix)
@@ -2428,6 +2726,8 @@ string
 
 
 ## devenv.warnOnNewVersion
+
+
 
 Whether to warn when a new version of either devenv or the direnv integration is available.
 
@@ -2728,7 +3028,7 @@ yaml contents
 
 
 *Type:*
-null or YAML value
+null or YAML 1.1 value
 
 
 
@@ -2737,6 +3037,27 @@ null or YAML value
 
 *Declared by:*
  - [https://github.com/cachix/devenv/blob/main/src/modules/files.nix](https://github.com/cachix/devenv/blob/main/src/modules/files.nix)
+
+
+
+## git.root
+
+
+
+Git repository root path. This field is populated automatically in devenv 1.10 and newer.
+
+
+
+*Type:*
+null or string
+
+
+
+*Default:*
+` null `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/git.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/git.nix)
 
 
 
@@ -2758,6 +3079,29 @@ submodule
 
 *Declared by:*
  - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/git-hooks.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/git-hooks.nix)
+
+
+
+## git-hooks.enable
+
+
+
+Whether to enable the pre-commit hooks module.
+
+When set to false, this disables the entire module.
+
+
+
+*Type:*
+boolean
+
+
+
+*Default:*
+` true `
+
+*Declared by:*
+ - [https://github.com/cachix/git-hooks.nix/blob/master/modules/pre-commit.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/pre-commit.nix)
 
 
 
@@ -2979,6 +3323,10 @@ hooks.my-tool = {
 
 The predefined hooks are:
 
+**` action-validator `**
+
+Tool to validate GitHub Action and Workflow YAML files
+
 **` actionlint `**
 
 Static checker for GitHub Actions workflow files
@@ -3122,6 +3470,10 @@ A tool for formatting CMake-files.
 **` commitizen `**
 
 Check whether the current commit message follows committing rules.
+
+**` comrak `**
+
+A 100% CommonMark-compatible GitHub Flavored Markdown formatter
 
 **` conform `**
 
@@ -3369,6 +3721,10 @@ Static type checker for Python
 
 Verify that Python test files are named correctly.
 
+**` nbstripout `**
+
+Strip output from Jupyter notebooks
+
 **` nil `**
 
 Incremental analysis assistant for writing in Nix.
@@ -3609,6 +3965,10 @@ Update uv’s lockfile.
 
 A markup-aware linter for prose built with speed and extensibility in mind.
 
+**` woodpecker-cli-lint `**
+
+Command line client for the Woodpecker Continuous Integration server (lint only).
+
 **` yamlfmt `**
 
 Formatter for YAML files.
@@ -3616,6 +3976,10 @@ Formatter for YAML files.
 **` yamllint `**
 
 Linter for YAML files.
+
+**` zizmor `**
+
+Static analysis for GitHub Actions
 
 **` zprint `**
 
@@ -4218,6 +4582,27 @@ boolean
 
 *Example:*
 ` true `
+
+*Declared by:*
+ - [https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix)
+
+
+
+## git-hooks.hooks.alejandra.settings.configPath
+
+
+
+(experimental) Path to the alejandra.toml configuration file.
+
+
+
+*Type:*
+null or string or absolute path
+
+
+
+*Default:*
+` null `
 
 *Declared by:*
  - [https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix)
@@ -4987,8 +5372,6 @@ boolean
 
 ## git-hooks.hooks.cmake-format
 
-
-
 cmake-format hook
 
 
@@ -5063,6 +5446,85 @@ string
 
 *Example:*
 ` ".cmake-format.json" `
+
+*Declared by:*
+ - [https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix)
+
+
+
+## git-hooks.hooks.convco
+
+
+
+convco hook
+
+
+
+*Type:*
+submodule
+
+*Declared by:*
+ - [https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix)
+
+
+
+## git-hooks.hooks.convco.enable
+
+
+
+Whether to enable this pre-commit hook.
+
+
+
+*Type:*
+boolean
+
+
+
+*Default:*
+` false `
+
+*Declared by:*
+ - [https://github.com/cachix/git-hooks.nix/blob/master/modules/hook.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/hook.nix)
+
+
+
+## git-hooks.hooks.convco.description
+
+
+
+Description of the hook. Used for metadata purposes only.
+
+
+
+*Type:*
+string
+
+
+
+*Default:*
+` "" `
+
+*Declared by:*
+ - [https://github.com/cachix/git-hooks.nix/blob/master/modules/hook.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/hook.nix)
+
+
+
+## git-hooks.hooks.convco.settings.configPath
+
+
+
+Path to the configuration file (YAML or JSON)
+
+
+
+*Type:*
+null or string or absolute path
+
+
+
+*Default:*
+` null `
 
 *Declared by:*
  - [https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix)
@@ -5249,6 +5711,8 @@ list of string
 
 
 ## git-hooks.hooks.deadnix.settings.hidden
+
+
 
 Recurse into hidden subdirectories and process hidden .\*.nix files.
 
@@ -6516,6 +6980,90 @@ string
 
 
 
+## git-hooks.hooks.gotest
+
+
+
+gotest hook
+
+
+
+*Type:*
+submodule
+
+*Declared by:*
+ - [https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix)
+
+
+
+## git-hooks.hooks.gotest.enable
+
+
+
+Whether to enable this pre-commit hook.
+
+
+
+*Type:*
+boolean
+
+
+
+*Default:*
+` false `
+
+*Declared by:*
+ - [https://github.com/cachix/git-hooks.nix/blob/master/modules/hook.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/hook.nix)
+
+
+
+## git-hooks.hooks.gotest.description
+
+
+
+Description of the hook. Used for metadata purposes only.
+
+
+
+*Type:*
+string
+
+
+
+*Default:*
+` "" `
+
+*Declared by:*
+ - [https://github.com/cachix/git-hooks.nix/blob/master/modules/hook.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/hook.nix)
+
+
+
+## git-hooks.hooks.gotest.settings.flags
+
+
+
+Flags passed to gotest. See all available [here](https://pkg.go.dev/cmd/go\#hdr-Test_packages).
+
+
+
+*Type:*
+string
+
+
+
+*Default:*
+` "" `
+
+
+
+*Example:*
+` "-tags integration" `
+
+*Declared by:*
+ - [https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix)
+
+
+
 ## git-hooks.hooks.headache
 
 
@@ -6891,8 +7439,6 @@ boolean
 
 
 ## git-hooks.hooks.lacheck.description
-
-
 
 Description of the hook. Used for metadata purposes only.
 
@@ -7307,6 +7853,8 @@ boolean
 
 
 ## git-hooks.hooks.mdl.description
+
+
 
 Description of the hook. Used for metadata purposes only.
 
@@ -7845,6 +8393,64 @@ null or string
 
 *Declared by:*
  - [https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix)
+
+
+
+## git-hooks.hooks.nbstripout
+
+
+
+nbstripout hook
+
+
+
+*Type:*
+submodule
+
+*Declared by:*
+ - [https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix)
+
+
+
+## git-hooks.hooks.nbstripout.enable
+
+
+
+Whether to enable this pre-commit hook.
+
+
+
+*Type:*
+boolean
+
+
+
+*Default:*
+` false `
+
+*Declared by:*
+ - [https://github.com/cachix/git-hooks.nix/blob/master/modules/hook.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/hook.nix)
+
+
+
+## git-hooks.hooks.nbstripout.description
+
+
+
+Description of the hook. Used for metadata purposes only.
+
+
+
+*Type:*
+string
+
+
+
+*Default:*
+` "" `
+
+*Declared by:*
+ - [https://github.com/cachix/git-hooks.nix/blob/master/modules/hook.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/hook.nix)
 
 
 
@@ -11269,11 +11875,52 @@ one of “auto”, “always”, “never”
 
 
 
+## git-hooks.hooks.typos.settings.config
+
+
+
+Configuration as in https://github.com/crate-ci/typos/blob/master/docs/reference.md.
+
+
+
+*Type:*
+TOML value
+
+
+
+*Default:*
+` { } `
+
+
+
+*Example:*
+
+```
+{
+  default = {
+    binary = false;
+  };
+  files = {
+    ignore-dot = true;
+  };
+  type = {
+    py = {
+      extend-glob = [ ];
+    };
+  };
+}
+```
+
+*Declared by:*
+ - [https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix)
+
+
+
 ## git-hooks.hooks.typos.settings.configPath
 
 
 
-Path to a custom config file.
+Path to a custom config file. Ignored if ` typos.settings.config ` is set.
 
 
 
@@ -11289,44 +11936,6 @@ string
 
 *Example:*
 ` ".typos.toml" `
-
-*Declared by:*
- - [https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix)
-
-
-
-## git-hooks.hooks.typos.settings.configuration
-
-
-
-Multiline-string configuration passed as config file. If set, config set in ` typos.settings.configPath ` gets ignored.
-
-
-
-*Type:*
-string
-
-
-
-*Default:*
-` "" `
-
-
-
-*Example:*
-
-```
-''
-  [files]
-  ignore-dot = true
-  
-  [default]
-  binary = false
-  
-  [type.py]
-  extend-glob = []
-''
-```
 
 *Declared by:*
  - [https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix)
@@ -11358,22 +11967,53 @@ boolean
 
 
 
-Ignore files and directories matching the glob.
+Ignore files and directories matching one of the globs.
 
 
 
 *Type:*
-string
+(list of string) or string convertible to it
 
 
 
 *Default:*
-` "" `
+` [ ] `
 
 
 
 *Example:*
-` "*.nix" `
+
+```
+[
+  "*.nix"
+]
+```
+
+*Declared by:*
+ - [https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix)
+
+
+
+## git-hooks.hooks.typos.settings.force-exclude
+
+
+
+Respect excluded files even for paths passed explicitly.
+
+
+
+*Type:*
+boolean
+
+
+
+*Default:*
+` true `
+
+
+
+*Example:*
+` false `
 
 *Declared by:*
  - [https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix)
@@ -11861,6 +12501,161 @@ string
 
 
 
+## git-hooks.hooks.woodpecker-cli-lint
+
+
+
+` woodpecker-cli lint ` hook
+
+
+
+*Type:*
+submodule
+
+*Declared by:*
+ - [https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix)
+
+
+
+## git-hooks.hooks.woodpecker-cli-lint.enable
+
+
+
+Whether to enable this pre-commit hook.
+
+
+
+*Type:*
+boolean
+
+
+
+*Default:*
+` false `
+
+*Declared by:*
+ - [https://github.com/cachix/git-hooks.nix/blob/master/modules/hook.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/hook.nix)
+
+
+
+## git-hooks.hooks.woodpecker-cli-lint.description
+
+
+
+Description of the hook. Used for metadata purposes only.
+
+
+
+*Type:*
+string
+
+
+
+*Default:*
+` "" `
+
+*Declared by:*
+ - [https://github.com/cachix/git-hooks.nix/blob/master/modules/hook.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/hook.nix)
+
+
+
+## git-hooks.hooks.woodpecker-cli-lint.settings.pluginsPrivileged
+
+
+
+List of plugins, allowed to run in privileged mode
+
+
+
+*Type:*
+strings concatenated with “,”
+
+
+
+*Default:*
+` "" `
+
+*Declared by:*
+ - [https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix)
+
+
+
+## git-hooks.hooks.woodpecker-cli-lint.settings.pluginsTrustedClone
+
+
+
+List of plugins, that are trusted to handle Git credentials in cloning steps.
+If not set, the program defaults to
+“docker.io/woodpeckerci/plugin-git:2.6.3,docker.io/woodpeckerci/plugin-git,quay.io/woodpeckerci/plugin-git”.
+
+
+
+*Type:*
+strings concatenated with “,”
+
+
+
+*Default:*
+` "" `
+
+*Declared by:*
+ - [https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix)
+
+
+
+## git-hooks.hooks.woodpecker-cli-lint.settings.strict
+
+
+
+Whether to treat warnings as errors.
+
+
+
+*Type:*
+boolean
+
+
+
+*Default:*
+` false `
+
+
+
+*Example:*
+` true `
+
+*Declared by:*
+ - [https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix)
+
+
+
+## git-hooks.hooks.woodpecker-cli-lint.settings.workflowPath
+
+
+
+Path to the workflow config file/directory. If not set, the program
+looks for ` .woodpecker.ya?ml ` file or ` .woodpecker ` directory.
+
+
+
+*Type:*
+string
+
+
+
+*Default:*
+` "" `
+
+
+
+*Example:*
+` ".woodpecker.yml" `
+
+*Declared by:*
+ - [https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix)
+
+
+
 ## git-hooks.hooks.yamlfmt
 
 
@@ -12167,6 +12962,30 @@ boolean
 
 *Declared by:*
  - [https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix)
+
+
+
+## git-hooks.install.enable
+
+
+
+Whether to enable automatic installation of pre-commit hooks.
+
+When set to false, hooks will not be installed into the git repository,
+but all other module functionality (like configuration generation) will still work.
+
+
+
+*Type:*
+boolean
+
+
+
+*Default:*
+` true `
+
+*Declared by:*
+ - [https://github.com/cachix/git-hooks.nix/blob/master/modules/pre-commit.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/pre-commit.nix)
 
 
 
@@ -15456,6 +16275,27 @@ boolean
 
 
 
+## languages.python.uv.sync.packages
+
+
+
+Sync for specific packages in the workspace. See ` --package `.
+
+
+
+*Type:*
+list of string
+
+
+
+*Default:*
+` [ ] `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/languages/python.nix](https://github.com/cachix/devenv/blob/main/src/modules/languages/python.nix)
+
+
+
 ## languages.python.uv.sync.allExtras
 
 
@@ -15492,6 +16332,48 @@ boolean
 
 *Default:*
 ` false `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/languages/python.nix](https://github.com/cachix/devenv/blob/main/src/modules/languages/python.nix)
+
+
+
+## languages.python.uv.sync.allPackages
+
+
+
+Sync all packages in the workspace. See ` --all-packages `.
+
+
+
+*Type:*
+boolean
+
+
+
+*Default:*
+` false `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/languages/python.nix](https://github.com/cachix/devenv/blob/main/src/modules/languages/python.nix)
+
+
+
+## languages.python.uv.sync.arguments
+
+
+
+Command line arguments pass to ` uv sync ` during devenv initialisation.
+
+
+
+*Type:*
+list of string
+
+
+
+*Default:*
+` [ ] `
 
 *Declared by:*
  - [https://github.com/cachix/devenv/blob/main/src/modules/languages/python.nix](https://github.com/cachix/devenv/blob/main/src/modules/languages/python.nix)
@@ -17419,7 +18301,7 @@ https://github.com/pvolok/mprocs?tab=readme-ov-file\#config
 
 
 *Type:*
-YAML value
+YAML 1.1 value
 
 
 
@@ -17507,7 +18389,7 @@ Example: https://github.com/F1bonacc1/process-compose/blob/main/process-compose.
 
 
 *Type:*
-YAML value
+YAML 1.1 value
 
 
 
@@ -17630,6 +18512,27 @@ attribute set of (submodule)
 
 
 
+## processes.\<name>.cwd
+
+
+
+Working directory to run the process in. If not specified, the current working directory will be used.
+
+
+
+*Type:*
+null or string
+
+
+
+*Default:*
+` null `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/processes.nix](https://github.com/cachix/devenv/blob/main/src/modules/processes.nix)
+
+
+
 ## processes.\<name>.exec
 
 
@@ -17659,7 +18562,7 @@ Only used when using ` process.manager.implementation = "process-compose"; `
 
 
 *Type:*
-attribute set
+YAML 1.1 value
 
 
 
@@ -17690,6 +18593,272 @@ attribute set
 
 *Declared by:*
  - [https://github.com/cachix/devenv/blob/main/src/modules/processes.nix](https://github.com/cachix/devenv/blob/main/src/modules/processes.nix)
+
+
+
+## profiles
+
+
+
+Profile definitions that can be activated manually or automatically.
+
+
+
+*Type:*
+lazy attribute set of (submodule)
+
+
+
+*Default:*
+` { } `
+
+
+
+*Example:*
+
+```
+{
+  # Manual profiles (activated via --profile)
+  "base" = {
+    module = {
+      languages.nix.enable = true;
+      packages = [ pkgs.git ];
+    };
+  };
+  "python-3.14" = {
+    extends = [ "base" ];
+    module = {
+      languages.python.version = "3.14";
+    };
+  };
+  "backend" = {
+    extends = [ "base" ];
+    module = {
+      services.postgres.enable = true;
+      services.redis.enable = true;
+    };
+  };
+  "fullstack" = {
+    extends = [ "backend" "python-3.14" ];
+    module = {
+      env.FULL_STACK = "true";
+    };
+  };
+  # Automatic hostname-based profiles
+  hostname."work-laptop" = {
+    extends = [ "backend" ];
+    module = {
+      env.WORK_ENV = "true";
+    };
+  };
+  # Automatic user-based profiles
+  user."alice" = {
+    extends = [ "python-3.14" ];
+    module = {
+      env.USER_ROLE = "developer";
+    };
+  };
+}
+
+```
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/profiles.nix](https://github.com/cachix/devenv/blob/main/src/modules/profiles.nix)
+
+
+
+## profiles.\<name>.extends
+
+
+
+List of profile names to extend/inherit from.
+
+
+
+*Type:*
+list of string
+
+
+
+*Default:*
+` [ ] `
+
+
+
+*Example:*
+
+```
+[
+  "base"
+  "backend"
+]
+```
+
+
+
+## profiles.\<name>.module
+
+
+
+Additional configuration to merge when this profile is active.
+
+
+
+*Type:*
+module
+
+
+
+*Default:*
+` { } `
+
+
+
+## profiles.hostname
+
+
+
+Profile definitions that are automatically activated based on the machine’s hostname.
+
+
+
+*Type:*
+lazy attribute set of (submodule)
+
+
+
+*Default:*
+` { } `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/profiles.nix](https://github.com/cachix/devenv/blob/main/src/modules/profiles.nix)
+
+
+
+## profiles.hostname.\<name>.extends
+
+
+
+List of profile names to extend/inherit from.
+
+
+
+*Type:*
+list of string
+
+
+
+*Default:*
+` [ ] `
+
+
+
+*Example:*
+
+```
+[
+  "base"
+  "backend"
+]
+```
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/profiles.nix](https://github.com/cachix/devenv/blob/main/src/modules/profiles.nix)
+
+
+
+## profiles.hostname.\<name>.module
+
+
+
+Additional configuration to merge when this profile is active.
+
+
+
+*Type:*
+module
+
+
+
+*Default:*
+` { } `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/profiles.nix](https://github.com/cachix/devenv/blob/main/src/modules/profiles.nix)
+
+
+
+## profiles.user
+
+
+
+Profile definitions that are automatically activated based on the username.
+
+
+
+*Type:*
+lazy attribute set of (submodule)
+
+
+
+*Default:*
+` { } `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/profiles.nix](https://github.com/cachix/devenv/blob/main/src/modules/profiles.nix)
+
+
+
+## profiles.user.\<name>.extends
+
+
+
+List of profile names to extend/inherit from.
+
+
+
+*Type:*
+list of string
+
+
+
+*Default:*
+` [ ] `
+
+
+
+*Example:*
+
+```
+[
+  "base"
+  "backend"
+]
+```
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/profiles.nix](https://github.com/cachix/devenv/blob/main/src/modules/profiles.nix)
+
+
+
+## profiles.user.\<name>.module
+
+
+
+Additional configuration to merge when this profile is active.
+
+
+
+*Type:*
+module
+
+
+
+*Default:*
+` { } `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/profiles.nix](https://github.com/cachix/devenv/blob/main/src/modules/profiles.nix)
 
 
 
@@ -17802,12 +18971,12 @@ string
 
 
 
-Shell code to execute when the script is run.
+Shell code to execute when the script is run, or path to a script file.
 
 
 
 *Type:*
-string
+string or absolute path
 
 *Declared by:*
  - [https://github.com/cachix/devenv/blob/main/src/modules/scripts.nix](https://github.com/cachix/devenv/blob/main/src/modules/scripts.nix)
@@ -20021,7 +21190,7 @@ string
 
 
 *Default:*
-` "/home/runner/work/devenv/devenv/.devenv/state/kafka/connect/connect.offsets" `
+` ${config.env.DEVENV_STATE}/kafka/connect/connect.offsets `
 
 *Declared by:*
  - [https://github.com/cachix/devenv/blob/main/src/modules/services/kafka-connect.nix](https://github.com/cachix/devenv/blob/main/src/modules/services/kafka-connect.nix)
@@ -22451,7 +23620,7 @@ OpenSearch configuration.
 
 
 *Type:*
-YAML value
+YAML 1.1 value
 
 
 
@@ -22647,7 +23816,7 @@ Override the configuration file used by OpenTelemetry Collector.
 By default, a configuration is generated from ` services.opentelemetry-collector.settings `.
 
 If overriding, enable the ` health_check ` extension to allow process-compose to check whether the Collector is ready.
-Otherwise, disable the readiness probe by setting ` processes.opentelemetry-collector.process-compose.readiness_probe = {}; `.
+Otherwise, disable the readiness probe by setting ` processes.opentelemetry-collector.process-compose.readiness_probe = lib.mkForce {}; `.
 
 
 
@@ -22684,7 +23853,7 @@ for more information on how to configure the Collector.
 
 
 *Type:*
-YAML value
+YAML 1.1 value
 
 
 
@@ -22803,8 +23972,10 @@ The available extensions are:
  - cstore_fdw
  - h3-pg
  - hypopg
+ - ip4r
  - jsonb_deep_sum
  - lantern
+ - omnigres
  - periods
  - pg-gvm
  - pg-semver
@@ -22861,6 +24032,7 @@ The available extensions are:
  - timescaledb-apache
  - timescaledb_toolkit
  - tsja
+ - vectorchord
  - wal2json
 
 
@@ -24705,7 +25877,7 @@ for more details.
 
 
 *Type:*
-null or YAML value
+null or YAML 1.1 value
 
 
 
@@ -24745,7 +25917,7 @@ for more details.
 
 
 *Type:*
-null or YAML value
+null or YAML 1.1 value
 
 
 
@@ -24974,7 +26146,7 @@ for more details.
 
 
 *Type:*
-null or YAML value
+null or YAML 1.1 value
 
 
 
@@ -25107,7 +26279,7 @@ for more details.
 
 
 *Type:*
-null or YAML value
+null or YAML 1.1 value
 
 
 
@@ -25132,7 +26304,7 @@ for more details.
 
 
 *Type:*
-null or YAML value
+null or YAML 1.1 value
 
 
 
@@ -25831,12 +27003,38 @@ The Starship configuration file to use.
 
 
 *Type:*
-absolute path
+null or absolute path
 
 
 
 *Default:*
+` null `
+
+
+
+*Example:*
 ` ${config.env.DEVENV_ROOT}/starship.toml `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/starship.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/starship.nix)
+
+
+
+## starship.config.settings
+
+
+
+Starship configuration to use
+
+
+
+*Type:*
+TOML value
+
+
+
+*Default:*
+` {} `
 
 *Declared by:*
  - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/starship.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/starship.nix)
@@ -25952,6 +27150,27 @@ list of string
 
 
 Override the binary name from the default ` package.meta.mainProgram `.
+
+
+
+*Type:*
+null or string
+
+
+
+*Default:*
+` null `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/tasks.nix](https://github.com/cachix/devenv/blob/main/src/modules/tasks.nix)
+
+
+
+## tasks.\<name>.cwd
+
+
+
+Working directory to run the task in. If not specified, the current working directory will be used.
 
 
 

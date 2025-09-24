@@ -27,6 +27,9 @@ boolean
 *Example:*
 ` true `
 
+*Declared by:*
+ - [https://github\.com/cachix/devenv/blob/main/src/modules/services/postgres\.nix](https://github.com/cachix/devenv/blob/main/src/modules/services/postgres.nix)
+
 
 
 ### services\.postgres\.package
@@ -54,6 +57,9 @@ pkgs.postgresql_15
 
 ```
 
+*Declared by:*
+ - [https://github\.com/cachix/devenv/blob/main/src/modules/services/postgres\.nix](https://github.com/cachix/devenv/blob/main/src/modules/services/postgres.nix)
+
 
 
 ### services\.postgres\.createDatabase
@@ -69,6 +75,9 @@ boolean
 
 *Default:*
 ` true `
+
+*Declared by:*
+ - [https://github\.com/cachix/devenv/blob/main/src/modules/services/postgres\.nix](https://github.com/cachix/devenv/blob/main/src/modules/services/postgres.nix)
 
 
 
@@ -87,8 +96,10 @@ The available extensions are:
  - cstore_fdw
  - h3-pg
  - hypopg
+ - ip4r
  - jsonb_deep_sum
  - lantern
+ - omnigres
  - periods
  - pg-gvm
  - pg-semver
@@ -145,6 +156,7 @@ The available extensions are:
  - timescaledb-apache
  - timescaledb_toolkit
  - tsja
+ - vectorchord
  - wal2json
 
 
@@ -169,6 +181,9 @@ extensions: [
 ];
 
 ```
+
+*Declared by:*
+ - [https://github\.com/cachix/devenv/blob/main/src/modules/services/postgres\.nix](https://github.com/cachix/devenv/blob/main/src/modules/services/postgres.nix)
 
 
 
@@ -197,6 +212,9 @@ null or string
 builtins.readFile ./my-custom/directory/to/pg_hba.conf
 
 ```
+
+*Declared by:*
+ - [https://github\.com/cachix/devenv/blob/main/src/modules/services/postgres\.nix](https://github.com/cachix/devenv/blob/main/src/modules/services/postgres.nix)
 
 
 
@@ -234,6 +252,9 @@ list of strings concatenated with “\\n”
 ]
 ```
 
+*Declared by:*
+ - [https://github\.com/cachix/devenv/blob/main/src/modules/services/postgres\.nix](https://github.com/cachix/devenv/blob/main/src/modules/services/postgres.nix)
+
 
 
 ### services\.postgres\.initialDatabases
@@ -268,6 +289,9 @@ list of (submodule)
 
 ```
 
+*Declared by:*
+ - [https://github\.com/cachix/devenv/blob/main/src/modules/services/postgres\.nix](https://github.com/cachix/devenv/blob/main/src/modules/services/postgres.nix)
+
 
 
 ### services\.postgres\.initialDatabases\.\*\.initialSQL
@@ -298,6 +322,9 @@ CREATE EXTENSION IF NOT EXISTS pg_uuidv7;
 
 ```
 
+*Declared by:*
+ - [https://github\.com/cachix/devenv/blob/main/src/modules/services/postgres\.nix](https://github.com/cachix/devenv/blob/main/src/modules/services/postgres.nix)
+
 
 
 ### services\.postgres\.initialDatabases\.\*\.name
@@ -310,6 +337,9 @@ The name of the database to create\.
 
 *Type:*
 string
+
+*Declared by:*
+ - [https://github\.com/cachix/devenv/blob/main/src/modules/services/postgres\.nix](https://github.com/cachix/devenv/blob/main/src/modules/services/postgres.nix)
 
 
 
@@ -328,6 +358,9 @@ null or string
 
 *Default:*
 ` null `
+
+*Declared by:*
+ - [https://github\.com/cachix/devenv/blob/main/src/modules/services/postgres\.nix](https://github.com/cachix/devenv/blob/main/src/modules/services/postgres.nix)
 
 
 
@@ -348,6 +381,9 @@ null or absolute path
 *Default:*
 ` null `
 
+*Declared by:*
+ - [https://github\.com/cachix/devenv/blob/main/src/modules/services/postgres\.nix](https://github.com/cachix/devenv/blob/main/src/modules/services/postgres.nix)
+
 
 
 ### services\.postgres\.initialDatabases\.\*\.user
@@ -365,6 +401,9 @@ null or string
 
 *Default:*
 ` null `
+
+*Declared by:*
+ - [https://github\.com/cachix/devenv/blob/main/src/modules/services/postgres\.nix](https://github.com/cachix/devenv/blob/main/src/modules/services/postgres.nix)
 
 
 
@@ -397,6 +436,9 @@ CREATE ROLE postgres SUPERUSER;
 CREATE ROLE bar;
 
 ```
+
+*Declared by:*
+ - [https://github\.com/cachix/devenv/blob/main/src/modules/services/postgres\.nix](https://github.com/cachix/devenv/blob/main/src/modules/services/postgres.nix)
 
 
 
@@ -433,6 +475,9 @@ string
 *Example:*
 ` "127.0.0.1" `
 
+*Declared by:*
+ - [https://github\.com/cachix/devenv/blob/main/src/modules/services/postgres\.nix](https://github.com/cachix/devenv/blob/main/src/modules/services/postgres.nix)
+
 
 
 ### services\.postgres\.port
@@ -450,6 +495,9 @@ The TCP port to accept connections\.
 
 *Default:*
 ` 5432 `
+
+*Declared by:*
+ - [https://github\.com/cachix/devenv/blob/main/src/modules/services/postgres\.nix](https://github.com/cachix/devenv/blob/main/src/modules/services/postgres.nix)
 
 
 
@@ -488,3 +536,6 @@ attribute set of (boolean or floating point number or signed integer or string)
 }
 
 ```
+
+*Declared by:*
+ - [https://github\.com/cachix/devenv/blob/main/src/modules/services/postgres\.nix](https://github.com/cachix/devenv/blob/main/src/modules/services/postgres.nix)

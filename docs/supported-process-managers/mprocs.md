@@ -19,6 +19,9 @@ package
 *Default:*
 ` pkgs.mprocs `
 
+*Declared by:*
+ - [https://github\.com/cachix/devenv/blob/main/src/modules/process-managers/mprocs\.nix](https://github.com/cachix/devenv/blob/main/src/modules/process-managers/mprocs.nix)
+
 
 
 ### process\.managers\.mprocs\.settings
@@ -32,9 +35,12 @@ https://github\.com/pvolok/mprocs?tab=readme-ov-file\#config
 
 
 *Type:*
-YAML value
+YAML 1\.1 value
 
 
 
 *Default:*
 ` { } `
+
+*Declared by:*
+ - [https://github\.com/cachix/devenv/blob/main/src/modules/process-managers/mprocs\.nix](https://github.com/cachix/devenv/blob/main/src/modules/process-managers/mprocs.nix)

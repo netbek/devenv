@@ -37,12 +37,8 @@ in
 {
   options = {
     env = lib.mkOption {
-      type = types.submoduleWith {
-        modules = [
-          (env: {
-            config._module.freeformType = types.lazyAttrsOf types.anything;
-          })
-        ];
+      type = types.submodule {
+        freeformType = types.lazyAttrsOf types.anything;
       };
       description = "Environment variables to be exposed inside the developer environment.";
       default = { };
@@ -255,6 +251,7 @@ in
   };
 
   imports = [
+    ./profiles.nix
     ./info.nix
     ./outputs.nix
     ./files.nix
@@ -265,6 +262,7 @@ in
     ./containers.nix
     ./debug.nix
     ./lib.nix
+    ./configurations.nix
     ./tests.nix
     ./cachix.nix
     ./tasks.nix
