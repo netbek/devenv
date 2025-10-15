@@ -2,21 +2,21 @@ use console::style;
 use std::collections::HashSet;
 use std::fmt;
 use std::io::{self, IsTerminal};
-use std::sync::Mutex;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tracing::level_filters::LevelFilter;
 use tracing::{
+    Event, Subscriber,
     field::{Field, Visit},
-    Event,
+    span,
 };
-use tracing_core::{span, Subscriber};
 use tracing_indicatif::IndicatifLayer;
 use tracing_subscriber::{
-    fmt::{format::Writer, FmtContext, FormatEvent, FormatFields},
+    EnvFilter, Layer,
+    fmt::{FmtContext, FormatEvent, FormatFields, format::Writer},
     layer,
     prelude::*,
     registry::LookupSpan,
-    EnvFilter, Layer,
 };
 
 #[derive(Default, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
@@ -54,10 +54,11 @@ pub enum LogFormat {
 }
 
 pub fn init_tracing_default() {
-    init_tracing(Level::default(), LogFormat::default());
+    let shutdown = tokio_shutdown::Shutdown::new();
+    init_tracing(Level::default(), LogFormat::default(), shutdown);
 }
 
-pub fn init_tracing(level: Level, log_format: LogFormat) {
+pub fn init_tracing(level: Level, log_format: LogFormat, _shutdown: Arc<tokio_shutdown::Shutdown>) {
     let devenv_layer = DevenvLayer::new();
 
     let filter = EnvFilter::builder()
@@ -165,11 +166,11 @@ impl std::fmt::Display for HumanReadableDuration {
         let mut t = self.0.as_nanos() as f64;
         for unit in ["ns", "µs", "ms", "s"].iter() {
             if t < 10.0 {
-                return write!(f, "{:.2}{}", t, unit);
+                return write!(f, "{t:.2}{unit}");
             } else if t < 100.0 {
-                return write!(f, "{:.1}{}", t, unit);
+                return write!(f, "{t:.1}{unit}");
             } else if t < 1000.0 {
-                return write!(f, "{:.0}{}", t, unit);
+                return write!(f, "{t:.0}{unit}");
             }
             t /= 1000.0;
         }
@@ -184,6 +185,8 @@ struct SpanContext {
     msg: String,
     /// Whether the span has an error event.
     has_error: bool,
+    /// Whether the spinner should be disabled for this span.
+    no_spinner: bool,
     /// Span timings
     timings: SpanTimings,
 }
@@ -259,7 +262,7 @@ impl<'a> FormatFields<'a> for DevenvFieldFormatter {
         fields.record(&mut extractor);
 
         if let Some(msg) = extractor.user_message {
-            write!(writer, "{}", msg)
+            write!(writer, "{msg}")
         } else {
             // Fallback - show nothing for spans without user messages
             Ok(())
@@ -270,14 +273,14 @@ impl<'a> FormatFields<'a> for DevenvFieldFormatter {
 /// A filter layer that wraps IndicatifLayer and only shows progress bars for spans with `devenv.user_message`
 pub struct DevenvIndicatifFilter<S, F> {
     inner: IndicatifLayer<S, F>,
-    user_message_spans: Mutex<HashSet<span::Id>>,
+    user_message_spans: RwLock<HashSet<span::Id>>,
 }
 
 impl<S, F> DevenvIndicatifFilter<S, F> {
     pub fn new(inner: IndicatifLayer<S, F>) -> Self {
         Self {
             inner,
-            user_message_spans: Mutex::new(HashSet::new()),
+            user_message_spans: RwLock::new(HashSet::new()),
         }
     }
 }
@@ -290,14 +293,23 @@ where
     fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: layer::Context<'_, S>) {
         // Check if this span has devenv.user_message field and extract the message
         #[derive(Default)]
-        struct UserMessageVisitor(Option<String>);
+        struct UserMessageVisitor {
+            user_message: Option<String>,
+            no_spinner: bool,
+        }
 
         impl Visit for UserMessageVisitor {
             fn record_debug(&mut self, _field: &Field, _value: &dyn fmt::Debug) {}
 
             fn record_str(&mut self, field: &Field, value: &str) {
                 if field.name() == "devenv.user_message" {
-                    self.0 = Some(value.to_string());
+                    self.user_message = Some(value.to_string());
+                }
+            }
+
+            fn record_bool(&mut self, field: &Field, value: bool) {
+                if field.name() == "devenv.no_spinner" {
+                    self.no_spinner = value;
                 }
             }
         }
@@ -305,38 +317,41 @@ where
         let mut visitor = UserMessageVisitor::default();
         attrs.record(&mut visitor);
 
-        if let Some(_user_message) = visitor.0 {
-            // This span has a user message, so it should get a progress bar
-            if let Ok(mut spans) = self.user_message_spans.lock() {
-                spans.insert(id.clone());
-            }
+        if let Some(_user_message) = visitor.user_message {
+            // This span has a user message, check if spinner should be disabled
+            if !visitor.no_spinner {
+                // Show progress bar only if spinner is not disabled
+                if let Ok(mut spans) = self.user_message_spans.write() {
+                    spans.insert(id.clone());
+                }
 
-            // Forward the span to IndicatifLayer - it will show devenv.user_message in {span_fields}
-            self.inner.on_new_span(attrs, id, ctx);
+                // Forward the span to IndicatifLayer - it will show devenv.user_message in {span_fields}
+                self.inner.on_new_span(attrs, id, ctx);
+            }
         }
     }
 
     fn on_enter(&self, id: &span::Id, ctx: layer::Context<'_, S>) {
         // Only forward if this is a user message span
-        if let Ok(spans) = self.user_message_spans.lock() {
-            if spans.contains(id) {
-                self.inner.on_enter(id, ctx);
-            }
+        if let Ok(spans) = self.user_message_spans.read()
+            && spans.contains(id)
+        {
+            self.inner.on_enter(id, ctx);
         }
     }
 
     fn on_exit(&self, id: &span::Id, ctx: layer::Context<'_, S>) {
         // Only forward if this is a user message span
-        if let Ok(spans) = self.user_message_spans.lock() {
-            if spans.contains(id) {
-                self.inner.on_exit(id, ctx);
-            }
+        if let Ok(spans) = self.user_message_spans.read()
+            && spans.contains(id)
+        {
+            self.inner.on_exit(id, ctx);
         }
     }
 
     fn on_close(&self, id: span::Id, ctx: layer::Context<'_, S>) {
         // Only forward if this is a user message span
-        let should_forward = if let Ok(mut spans) = self.user_message_spans.lock() {
+        let should_forward = if let Ok(mut spans) = self.user_message_spans.write() {
             let contained = spans.contains(&id);
             spans.remove(&id); // Clean up
             contained
@@ -377,14 +392,23 @@ where
         let span = ctx.span(id).expect("Span not found in context");
 
         #[derive(Default)]
-        struct UserMessageVisitor(Option<String>);
+        struct UserMessageVisitor {
+            user_message: Option<String>,
+            no_spinner: bool,
+        }
 
         impl Visit for UserMessageVisitor {
             fn record_debug(&mut self, _field: &Field, _value: &dyn fmt::Debug) {}
 
             fn record_str(&mut self, field: &Field, value: &str) {
                 if field.name() == "devenv.user_message" {
-                    self.0 = Some(value.to_string());
+                    self.user_message = Some(value.to_string());
+                }
+            }
+
+            fn record_bool(&mut self, field: &Field, value: bool) {
+                if field.name() == "devenv.no_spinner" {
+                    self.no_spinner = value;
                 }
             }
         }
@@ -394,12 +418,32 @@ where
 
         let mut ext = span.extensions_mut();
 
-        if let Some(msg) = visitor.0 {
+        if let Some(msg) = visitor.user_message {
             ext.insert(SpanContext {
                 msg: msg.clone(),
                 has_error: false,
+                no_spinner: visitor.no_spinner,
                 timings: SpanTimings::new(),
             });
+
+            // If spinner is disabled, emit a start event to show the initial message
+            if visitor.no_spinner {
+                let msg = msg.clone();
+
+                with_event_from_span!(
+                    id,
+                    span,
+                    "message" = msg,
+                    "devenv.is_user_message" = true,
+                    "devenv.span_event_kind" = SpanKind::Start as u8,
+                    "devenv.span_has_error" = false,
+                    |event| {
+                        drop(ext);
+                        drop(span);
+                        ctx.event(&event);
+                    }
+                );
+            }
         }
     }
 
@@ -486,7 +530,7 @@ where
         impl Visit for EventVisitor {
             fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
                 if field.name() == "message" {
-                    self.message = Some(format!("{:?}", value));
+                    self.message = Some(format!("{value:?}"));
                 }
             }
 
@@ -512,31 +556,42 @@ where
         let mut visitor = EventVisitor::default();
         event.record(&mut visitor);
 
-        if let Some(span_kind) = visitor.span_event_kind {
-            if let Some(span) = ctx.parent_span() {
-                let ext = span.extensions();
+        if let Some(span_kind) = visitor.span_event_kind
+            && let Some(span) = ctx.parent_span()
+        {
+            let ext = span.extensions();
 
-                if let Some(span_ctx) = ext.get::<SpanContext>() {
-                    if visitor.is_user_message {
-                        let time_total = format!("{}", span_ctx.timings.total_duration());
-                        let has_error = span_ctx.has_error;
-                        let msg = &span_ctx.msg;
-                        match span_kind {
-                            SpanKind::Start => {
-                                // IndicatifLayer will handle the spinner, but we still need to
-                                // return early to avoid duplicate output in our format layer
-                                return Ok(());
+            if let Some(span_ctx) = ext.get::<SpanContext>()
+                && visitor.is_user_message
+            {
+                let ansi = writer.has_ansi_escapes();
+                let time_total = format!("{}", span_ctx.timings.total_duration());
+                let has_error = span_ctx.has_error;
+                let msg = &span_ctx.msg;
+                match span_kind {
+                    SpanKind::Start => {
+                        // If spinner is disabled, show the start message with a dot
+                        if span_ctx.no_spinner {
+                            if ansi {
+                                write!(writer, "{prefix} ", prefix = style("•").blue())?;
                             }
-
-                            SpanKind::End => {
-                                let prefix = if has_error {
-                                    style("✖").red()
-                                } else {
-                                    style("✓").green()
-                                };
-                                return writeln!(writer, "{} {} in {}", prefix, msg, time_total);
-                            }
+                            return writeln!(writer, "{msg}");
                         }
+                        // Otherwise, IndicatifLayer will handle the spinner, but we still need to
+                        // return early to avoid duplicate output in our format layer
+                        return Ok(());
+                    }
+
+                    SpanKind::End => {
+                        if ansi {
+                            let prefix = if has_error {
+                                style("✖").red()
+                            } else {
+                                style("✓").green()
+                            };
+                            write!(writer, "{prefix} ")?;
+                        }
+                        return writeln!(writer, "{msg} in {time_total}");
                     }
                 }
             }
@@ -566,7 +621,7 @@ where
                 }
             }
 
-            writeln!(writer, "{}", msg)?;
+            writeln!(writer, "{msg}")?;
         };
 
         Ok(())

@@ -1,14 +1,13 @@
 use crate::{
     cli, config, devenv,
     nix_backend::{self, NixBackend},
+    nix_log_bridge::NixLogBridge,
 };
 use async_trait::async_trait;
 use futures::future;
-use miette::{bail, IntoDiagnostic, Result, WrapErr};
+use miette::{IntoDiagnostic, Result, WrapErr, bail};
 use nix_conf_parser::NixConf;
-use secretspec;
 use serde::Deserialize;
-use serde_json;
 use sqlx::SqlitePool;
 use std::collections::{BTreeMap, HashMap};
 use std::env;
@@ -20,7 +19,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs;
 use tokio::sync::OnceCell;
-use tracing::{debug, debug_span, error, info, instrument, warn, Instrument};
+use tracing::{Instrument, debug, debug_span, error, info, instrument, warn};
 
 pub struct Nix {
     pub options: nix_backend::Options,
@@ -111,7 +110,7 @@ impl Nix {
 
         // Save the GC root for this profile.
         let now_ns = get_now_with_nanoseconds();
-        let target = format!("{}-shell", now_ns);
+        let target = format!("{now_ns}-shell");
         if let Ok(resolved_gc_root) = fs::canonicalize(gc_root).await {
             symlink_force(&resolved_gc_root, &self.paths.home_gc.join(target)).await?;
         } else {
@@ -191,7 +190,7 @@ impl Nix {
         args.push("--print-out-paths".to_string());
         args.push("-L".to_string());
 
-        args.extend(attributes.iter().map(|attr| format!(".#{}", attr)));
+        args.extend(attributes.iter().map(|attr| format!(".#{attr}")));
         let args_str: Vec<&str> = args.iter().map(AsRef::as_ref).collect();
         let output = self
             .run_nix_with_substituters("nix", &args_str, &options)
@@ -212,7 +211,7 @@ impl Nix {
             .into_iter()
             .map(String::from)
             .collect();
-        args.extend(attributes.iter().map(|attr| format!(".#{}", attr)));
+        args.extend(attributes.iter().map(|attr| format!(".#{attr}")));
         let args = &args.iter().map(|s| s.as_str()).collect::<Vec<&str>>();
         let result = self.run_nix("nix", args, &options).await?;
         String::from_utf8(result.stdout)
@@ -328,7 +327,7 @@ impl Nix {
         options: &nix_backend::Options,
     ) -> Result<devenv_eval_cache::Output> {
         use devenv_eval_cache::internal_log::Verbosity;
-        use devenv_eval_cache::{supports_eval_caching, CachedCommand};
+        use devenv_eval_cache::{NixCommand, supports_eval_caching};
 
         if options.replace_shell {
             if self.global_options.nix_debugger
@@ -355,52 +354,79 @@ impl Nix {
             }
         }
 
-        let result = if self.global_options.eval_cache
-            && options.cache_output
-            && supports_eval_caching(&cmd)
-            && self.pool.get().is_some()
-        {
+        let result = if supports_eval_caching(&cmd) && self.pool.get().is_some() {
             let pool = self.pool.get().unwrap();
-            let mut cached_cmd = CachedCommand::new(pool);
+            let mut cached_cmd = NixCommand::new(pool);
 
-            cached_cmd.watch_path(self.paths.root.join(devenv::DEVENV_FLAKE));
-            cached_cmd.watch_path(self.paths.root.join("devenv.yaml"));
-            cached_cmd.watch_path(self.paths.root.join("devenv.lock"));
-            cached_cmd.watch_path(self.paths.dotfile.join("flake.json"));
-            cached_cmd.watch_path(self.paths.dotfile.join("cli-options.nix"));
+            if self.global_options.eval_cache && options.cache_output {
+                cached_cmd.watch_path(self.paths.root.join(devenv::DEVENV_FLAKE));
+                cached_cmd.watch_path(self.paths.root.join("devenv.yaml"));
+                cached_cmd.watch_path(self.paths.root.join("devenv.lock"));
+                cached_cmd.watch_path(self.paths.dotfile.join("flake.json"));
+                cached_cmd.watch_path(self.paths.dotfile.join("cli-options.nix"));
 
-            // Ignore anything in .devenv except for the specifically watched files above.
-            cached_cmd.unwatch_path(&self.paths.dotfile);
+                // Ignore anything in .devenv except for the specifically watched files above.
+                cached_cmd.unwatch_path(&self.paths.dotfile);
 
-            if self.global_options.refresh_eval_cache || options.refresh_cached_output {
-                cached_cmd.force_refresh();
+                if self.global_options.refresh_eval_cache || options.refresh_cached_output {
+                    cached_cmd.force_refresh();
+                }
+            } else {
+                cached_cmd.enable_eval_cache(false);
             }
 
-            if options.logging && !self.global_options.quiet {
-                // Show eval and build logs only in verbose mode
-                let target_log_level = if self.global_options.verbose {
-                    Verbosity::Talkative
-                } else {
-                    Verbosity::Warn
-                };
+            // Setup Nix log bridge for enhanced log processing
+            let nix_bridge = NixLogBridge::new();
 
-                cached_cmd.on_stderr(move |log| {
-                    if let Some(log) = log.filter_by_level(target_log_level) {
-                        if let Some(msg) = log.get_msg() {
-                            use devenv_eval_cache::internal_log::InternalLog;
-                            match log {
-                                InternalLog::Msg { level, .. } => match *level {
-                                    Verbosity::Error => error!("{msg}"),
-                                    Verbosity::Warn => warn!("{msg}"),
-                                    Verbosity::Talkative => debug!("{msg}"),
-                                    _ => info!("{msg}"),
-                                },
+            // Add stderr processing callback with proper lifetime management
+            let bridge_for_callback = nix_bridge.clone();
+            let logging = options.logging;
+            let quiet = self.global_options.quiet;
+            let verbose = self.global_options.verbose;
+
+            cached_cmd.on_stderr(move |log| {
+                // Send to Nix log bridge for detailed progress tracking
+                // The bridge will emit appropriate tracing events
+                bridge_for_callback.process_internal_log(log.clone());
+
+                // Only output to tracing logs if logging is enabled
+                // This provides fallback logging when detailed processing is not needed
+                if logging && !quiet {
+                    let target_log_level = if verbose {
+                        Verbosity::Talkative
+                    } else {
+                        Verbosity::Warn
+                    };
+
+                    if let Some(log) = log.filter_by_level(target_log_level)
+                        && let Some(msg) = log.get_msg()
+                    {
+                        use devenv_eval_cache::internal_log::InternalLog;
+                        match log {
+                            InternalLog::Msg { level, .. } => match *level {
+                                Verbosity::Error => error!("{msg}"),
+                                Verbosity::Warn => warn!("{msg}"),
+                                Verbosity::Talkative => debug!("{msg}"),
                                 _ => info!("{msg}"),
-                            };
+                            },
+                            _ => info!("{msg}"),
                         }
                     }
-                });
+                }
+            });
+
+            // Set current operation for Nix log correlation
+            if self.global_options.verbose {
+                // In verbose mode: create bridge operation that will be child of the debug span
+                let cmd_string = display_command(&cmd);
+                // Use a simple hash of the command for the operation ID
+                use std::hash::{Hash, Hasher};
+                let mut cmd_hash = std::collections::hash_map::DefaultHasher::new();
+                cmd_string.hash(&mut cmd_hash);
+                let command_operation_id = format!("nix-cmd-{:x}", cmd_hash.finish());
+                nix_bridge.set_current_operation(command_operation_id);
             }
+            // In non-verbose mode: don't set bridge operation, logs will attach via fallback
 
             let pretty_cmd = display_command(&cmd);
             let span = debug_span!(
@@ -415,6 +441,10 @@ impl Nix {
                 .into_diagnostic()
                 .wrap_err_with(|| format!("Failed to run command `{}`", display_command(&cmd)))?;
 
+            // Clear bridge operation
+            nix_bridge.clear_current_operation();
+
+            // Record cache status if applicable
             if output.cache_hit {
                 tracing::Span::current().record(
                     "cache_status",
@@ -445,11 +475,11 @@ impl Nix {
             }
         };
 
-        tracing::Span::current().record("output", format!("{:?}", result));
+        tracing::Span::current().record("output", format!("{result:?}"));
 
         if !result.status.success() {
             let code = match result.status.code() {
-                Some(code) => format!("with exit code {}", code),
+                Some(code) => format!("with exit code {code}"),
                 None => "without an exit code".to_string(),
             };
 
@@ -504,7 +534,7 @@ impl Nix {
                             .caches
                             .pull
                             .iter()
-                            .map(|cache| format!("https://{}.cachix.org", cache))
+                            .map(|cache| format!("https://{cache}.cachix.org"))
                             .collect::<Vec<String>>();
                         pull_caches.sort();
                         pull_caches_str = pull_caches.join(" ");
@@ -529,36 +559,36 @@ impl Nix {
                     }
 
                     // Configure a netrc file with the auth token if available
-                    if !cachix_caches.caches.pull.is_empty() {
-                        if let Ok(auth_token) = env::var("CACHIX_AUTH_TOKEN") {
-                            let netrc_path = self
-                                .netrc_path
-                                .get_or_try_init(|| async {
-                                    let netrc_path = self.paths.dotfile.join("netrc");
-                                    let netrc_path_str = netrc_path.to_string_lossy().to_string();
+                    if !cachix_caches.caches.pull.is_empty()
+                        && let Ok(auth_token) = env::var("CACHIX_AUTH_TOKEN")
+                    {
+                        let netrc_path = self
+                            .netrc_path
+                            .get_or_try_init(|| async {
+                                let netrc_path = self.paths.dotfile.join("netrc");
+                                let netrc_path_str = netrc_path.to_string_lossy().to_string();
 
-                                    self.create_netrc_file(
-                                        &netrc_path,
-                                        &cachix_caches.caches.pull,
-                                        &auth_token,
-                                    )
-                                    .await?;
+                                self.create_netrc_file(
+                                    &netrc_path,
+                                    &cachix_caches.caches.pull,
+                                    &auth_token,
+                                )
+                                .await?;
 
-                                    Ok::<String, miette::Report>(netrc_path_str)
-                                })
-                                .await;
+                                Ok::<String, miette::Report>(netrc_path_str)
+                            })
+                            .await;
 
-                            match netrc_path {
-                                Ok(netrc_path) => {
-                                    final_args.extend_from_slice(&[
-                                        "--option",
-                                        "netrc-file",
-                                        netrc_path,
-                                    ]);
-                                }
-                                Err(e) => {
-                                    warn!("${e}")
-                                }
+                        match netrc_path {
+                            Ok(netrc_path) => {
+                                final_args.extend_from_slice(&[
+                                    "--option",
+                                    "netrc-file",
+                                    netrc_path,
+                                ]);
+                            }
+                            Err(e) => {
+                                warn!("${e}")
                             }
                         }
                     }
@@ -763,15 +793,14 @@ impl Nix {
             .into_diagnostic()
             .and_then(|content| serde_json::from_str(&content).into_diagnostic())
             .unwrap_or_else(|e| {
-                if let Some(source) = e.chain().find_map(|s| s.downcast_ref::<std::io::Error>()) {
-                    if source.kind() != std::io::ErrorKind::NotFound {
+                if let Some(source) = e.chain().find_map(|s| s.downcast_ref::<std::io::Error>())
+                    && source.kind() != std::io::ErrorKind::NotFound {
                         error!(
                             "Failed to load cachix trusted keys from {}:\n{}.",
                             trusted_keys_path.display(),
                             e
                         );
                     }
-                }
                 BTreeMap::new()
             });
 
@@ -804,12 +833,12 @@ impl Nix {
                 let name = name.clone();
                 async move {
                     let result = async {
-                        let mut request = client.get(format!("https://cachix.org/api/v1/cache/{}", name));
+                        let mut request = client.get(format!("https://cachix.org/api/v1/cache/{name}"));
                         if let Some(token) = auth_token {
                             request = request.bearer_auth(token);
                         }
                         let resp = request.send().await.into_diagnostic().wrap_err_with(|| {
-                            format!("Failed to fetch information for cache '{}'", name)
+                            format!("Failed to fetch information for cache '{name}'")
                         })?;
                         if resp.status().is_client_error() {
                             error!(
@@ -829,7 +858,7 @@ impl Nix {
 
                     match result {
                         Ok(key) => Ok((name.clone(), key)),
-                        Err(e) => Err(e.wrap_err(format!("Failed to fetch cache '{}'", name)))
+                        Err(e) => Err(e.wrap_err(format!("Failed to fetch cache '{name}'")))
                     }
                 }
             }).collect();
@@ -1139,7 +1168,7 @@ fn get_now_with_nanoseconds() -> String {
     let duration = now.duration_since(UNIX_EPOCH).expect("Time went backwards");
     let secs = duration.as_secs();
     let nanos = duration.subsec_nanos();
-    format!("{}.{}", secs, nanos)
+    format!("{secs}.{nanos}")
 }
 
 // Display a command as a pretty string.
@@ -1201,7 +1230,7 @@ fn detect_missing_caches(caches: &CachixCaches, nix_conf: NixConf) -> (Vec<Strin
         .collect::<Vec<_>>();
 
     for cache in caches.caches.pull.iter() {
-        let cache_url = format!("https://{}.cachix.org", cache);
+        let cache_url = format!("https://{cache}.cachix.org");
         if !all_substituters.iter().any(|s| s == &cache_url) {
             missing_caches.push(cache_url);
         }

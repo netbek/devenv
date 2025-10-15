@@ -39,47 +39,48 @@ let
   # Collect all hooks by type
   allHooks = lib.mapAttrsToList
     (
-      name: hook:
-        lib.mkIf hook.enable {
-          type = hook.hookType;
-          hook = {
-            matcher = hook.matcher;
-            command = hook.command;
-          };
-        }
+      name: hook: {
+        type = hook.hookType;
+        hook = {
+          matcher = hook.matcher;
+          command = hook.command;
+        };
+      }
     )
-    cfg.hooks;
+    (lib.filterAttrs (name: hook: hook.enable) cfg.hooks);
 
   # Group hooks by type
   groupedHooks = lib.mapAttrs (k: v: map (h: h.hook) v) (
-    lib.groupBy (h: h.type) (lib.filter (h: h != false) allHooks)
+    lib.groupBy (h: h.type) allHooks
   );
 
   # Add pre-commit hook if git-hooks are enabled
   postToolUseHooks = (groupedHooks.PostToolUse or [ ]) ++ preCommitHook;
 
   # Build MCP servers configuration
-  mcpServers = lib.mapAttrs (name: server: 
-    if server.type == "stdio" then 
-      if server.command == null then
-        throw "MCP server '${name}' of type 'stdio' requires a command"
-      else {
-        type = "stdio";
-        command = server.command;
-      } // lib.optionalAttrs (server.args != []) {
-        args = server.args;
-      } // lib.optionalAttrs (server.env != {}) {
-        env = server.env;
-      }
-    else if server.type == "http" then
-      if server.url == null then
-        throw "MCP server '${name}' of type 'http' requires a url"
-      else {
-        type = "http";
-        url = server.url;
-      }
-    else throw "Invalid MCP server type: ${server.type}"
-  ) cfg.mcpServers;
+  mcpServers = lib.mapAttrs
+    (name: server:
+      if server.type == "stdio" then
+        if server.command == null then
+          throw "MCP server '${name}' of type 'stdio' requires a command"
+        else {
+          type = "stdio";
+          command = server.command;
+        } // lib.optionalAttrs (server.args != [ ]) {
+          args = server.args;
+        } // lib.optionalAttrs (server.env != { }) {
+          env = server.env;
+        }
+      else if server.type == "http" then
+        if server.url == null then
+          throw "MCP server '${name}' of type 'http' requires a url"
+        else {
+          type = "http";
+          url = server.url;
+        }
+      else throw "Invalid MCP server type: ${server.type}"
+    )
+    cfg.mcpServers;
 
   # Generate the settings content
   settingsContent = lib.filterAttrs (n: v: v != null) {
@@ -101,7 +102,7 @@ let
   };
 
   # Generate the MCP configuration content
-  mcpContent = if cfg.mcpServers == {} then null else {
+  mcpContent = if cfg.mcpServers == { } then null else {
     mcpServers = mcpServers;
   };
 in
@@ -441,9 +442,9 @@ in
   config = lib.mkIf cfg.enable {
     files = lib.mkMerge [
       { ".claude/settings.json".json = settingsContent; }
-      
+
       # MCP configuration file
-      (lib.mkIf (cfg.mcpServers != {}) {
+      (lib.mkIf (cfg.mcpServers != { }) {
         ".mcp.json".json = mcpContent;
       })
 

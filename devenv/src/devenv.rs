@@ -3,14 +3,12 @@ use ::nix::sys::signal;
 use ::nix::unistd::Pid;
 use clap::crate_version;
 use cli_table::Table;
-use cli_table::{print_stderr, WithTitle};
-use include_dir::{include_dir, Dir};
-use miette::{bail, miette, IntoDiagnostic, Result, WrapErr};
+use cli_table::{WithTitle, print_stderr};
+use include_dir::{Dir, include_dir};
+use miette::{IntoDiagnostic, Result, WrapErr, bail, miette};
 use once_cell::sync::Lazy;
 use secrecy::ExposeSecret;
-use secretspec;
 use serde::Deserialize;
-use serde_json;
 use sha2::Digest;
 use similar::{ChangeTag, TextDiff};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -20,14 +18,14 @@ use std::os::unix::{fs::PermissionsExt, process::CommandExt};
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 use tokio::fs::{self, File};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process;
 use tokio::sync::{OnceCell, RwLock, Semaphore};
-use tracing::{debug, error, info, info_span, instrument, trace, warn, Instrument};
+use tracing::{Instrument, debug, error, info, info_span, instrument, trace, warn};
 
 // templates
 const FLAKE_TMPL: &str = include_str!("flake.tmpl.nix");
@@ -52,12 +50,37 @@ pub static DIRENVRC_VERSION: Lazy<u8> = Lazy::new(|| {
 // project vars
 pub(crate) const DEVENV_FLAKE: &str = ".devenv.flake.nix";
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct DevenvOptions {
     pub config: config::Config,
     pub global_options: Option<cli::GlobalOptions>,
     pub devenv_root: Option<PathBuf>,
     pub devenv_dotfile: Option<PathBuf>,
+    pub shutdown: Arc<tokio_shutdown::Shutdown>,
+}
+
+impl DevenvOptions {
+    pub fn new(shutdown: Arc<tokio_shutdown::Shutdown>) -> Self {
+        Self {
+            config: config::Config::default(),
+            global_options: None,
+            devenv_root: None,
+            devenv_dotfile: None,
+            shutdown,
+        }
+    }
+}
+
+impl Default for DevenvOptions {
+    fn default() -> Self {
+        Self {
+            config: config::Config::default(),
+            global_options: None,
+            devenv_root: None,
+            devenv_dotfile: None,
+            shutdown: tokio_shutdown::Shutdown::new(),
+        }
+    }
 }
 
 #[derive(Default, Debug)]
@@ -99,12 +122,17 @@ pub struct Devenv {
     // TODO: make private.
     // Pass as an arg or have a setter.
     pub container_name: Option<String>,
+
+    // Shutdown handle for coordinated shutdown
+    shutdown: Arc<tokio_shutdown::Shutdown>,
 }
 
 impl Devenv {
     pub async fn new(options: DevenvOptions) -> Self {
-        let xdg_dirs = xdg::BaseDirectories::with_prefix("devenv").unwrap();
-        let devenv_home = xdg_dirs.get_data_home();
+        let xdg_dirs = xdg::BaseDirectories::with_prefix("devenv");
+        let devenv_home = xdg_dirs
+            .get_data_home()
+            .expect("Failed to get home directory");
         let cachix_trusted_keys = devenv_home.join("cachix_trusted_keys.json");
         let devenv_home_gc = devenv_home.join("gc");
 
@@ -192,6 +220,7 @@ impl Devenv {
             has_processes: Arc::new(OnceCell::new()),
             secretspec_resolved,
             container_name: None,
+            shutdown: options.shutdown,
         }
     }
 
@@ -416,7 +445,7 @@ impl Devenv {
         let err = shell_cmd.into_std().exec();
 
         let cmd_context = match &cmd {
-            Some(c) => format!("command '{}'", c),
+            Some(c) => format!("command '{c}'"),
             None => "interactive shell".to_string(),
         };
         bail!("Failed to exec into shell with {}: {}", cmd_context, err);
@@ -769,7 +798,9 @@ impl Devenv {
         // Set environment variables in the current process
         // This ensures that tasks have access to all devenv environment variables
         for (key, value) in &envs {
-            std::env::set_var(key, value);
+            unsafe {
+                std::env::set_var(key, value);
+            }
         }
 
         let tasks = self.load_tasks().await?;
@@ -787,13 +818,16 @@ impl Devenv {
             roots,
             tasks,
             run_mode,
+            sudo_context: None,
         };
         debug!(
             "Tasks config: {}",
             serde_json::to_string_pretty(&config).unwrap()
         );
 
-        let mut tui = tasks::TasksUi::builder(config, verbosity).build().await?;
+        let mut tui = tasks::TasksUi::builder(config, verbosity, self.shutdown.clone())
+            .build()
+            .await?;
         let (tasks_status, outputs) = tui.run().await?;
 
         if tasks_status.failed > 0 || tasks_status.dependency_failed > 0 {
@@ -923,15 +957,22 @@ impl Devenv {
             self.up(vec![], &options).await?;
         }
 
-        let span = info_span!("test", devenv.user_message = "Running tests");
+        // Disable the spinner for tests.
+        // Tests can arbitrarily write to stdout/stderr at the moment.
+        // Until that is changed, the spinner must be disabled.
+        let span = info_span!(
+            "test",
+            devenv.user_message = "Running tests",
+            devenv.no_spinner = true,
+            test_script = %test_script
+        );
         let result = async {
-            debug!("Running command: {test_script}");
             process::Command::new(&test_script)
                 .env_clear()
                 .envs(envs)
                 .spawn()
                 .into_diagnostic()
-                .wrap_err_with(|| format!("Failed to spawn test process using {}", test_script))?
+                .wrap_err_with(|| format!("Failed to spawn test process using {test_script}"))?
                 .wait_with_output()
                 .await
                 .into_diagnostic()
@@ -956,7 +997,7 @@ impl Devenv {
     pub async fn info(&self) -> Result<()> {
         self.assemble(false).await?;
         let output = self.nix.metadata().await?;
-        println!("{}", output);
+        println!("{output}");
         Ok(())
     }
 
@@ -977,9 +1018,7 @@ impl Devenv {
                             match value {
                                 serde_json::Value::Object(obj) => obj
                                     .iter()
-                                    .flat_map(|(k, v)| {
-                                        flatten_object(&format!("{}.{}", prefix, k), v)
-                                    })
+                                    .flat_map(|(k, v)| flatten_object(&format!("{prefix}.{k}"), v))
                                     .collect(),
                                 _ => vec![format!("devenv.config.{}", prefix)],
                             }
@@ -990,7 +1029,7 @@ impl Devenv {
             } else {
                 attributes
                     .iter()
-                    .map(|attr| format!("devenv.config.{}", attr))
+                    .map(|attr| format!("devenv.config.{attr}"))
                     .collect()
             };
             let paths = self
@@ -1075,6 +1114,48 @@ impl Devenv {
             };
 
             if options.detach {
+                // Check if processes are already running
+                if self.processes_pid().exists() {
+                    match fs::read_to_string(self.processes_pid()).await {
+                        Ok(pid_str) => {
+                            if let Ok(pid_num) = pid_str.trim().parse::<i32>() {
+                                let pid = Pid::from_raw(pid_num);
+                                match signal::kill(pid, None) {
+                                    Ok(_) => {
+                                        // Process is running
+                                        bail!("Processes already running with PID {}. Stop them first with: devenv processes down", pid);
+                                    }
+                                    Err(::nix::errno::Errno::ESRCH) => {
+                                        // Process not found - stale PID file
+                                        warn!("Found stale PID file with PID {}. Removing it.", pid);
+                                        fs::remove_file(self.processes_pid())
+                                            .await
+                                            .expect("Failed to remove stale PID file");
+                                    }
+                                    Err(_) => {
+                                        // Other error - remove stale file
+                                        warn!("Found invalid PID file. Removing it.");
+                                        fs::remove_file(self.processes_pid())
+                                            .await
+                                            .expect("Failed to remove stale PID file");
+                                    }
+                                }
+                            } else {
+                                // Invalid PID format
+                                warn!("Found invalid PID file. Removing it.");
+                                fs::remove_file(self.processes_pid())
+                                    .await
+                                    .expect("Failed to remove stale PID file");
+                            }
+                        }
+                        Err(_) => {
+                            // Could not read file
+                            warn!("Found unreadable PID file. Removing it.");
+                            let _ = fs::remove_file(self.processes_pid()).await;
+                        }
+                    }
+                }
+
                 let process = if !options.log_to_file {
                     cmd.stdout(Stdio::inherit())
                         .stderr(Stdio::inherit())
@@ -1147,7 +1228,11 @@ impl Devenv {
                     // Process still exists
                     let elapsed = start_time.elapsed();
                     if elapsed >= max_wait {
-                        warn!("Process {} did not shut down gracefully within {} seconds, sending SIGKILL to process group", pid, max_wait.as_secs());
+                        warn!(
+                            "Process {} did not shut down gracefully within {} seconds, sending SIGKILL to process group",
+                            pid,
+                            max_wait.as_secs()
+                        );
 
                         // Send SIGKILL to the entire process group
                         // Negative PID means send to process group
@@ -1346,8 +1431,11 @@ impl Devenv {
                 // Parse the path and type from the first value
                 let key_parts: Vec<&str> = chunk[0].split(':').collect();
                 if key_parts.len() < 2 {
-                    miette::bail!("Invalid option format: '{}'. Must include type, e.g. 'languages.rust.version:string'. Supported types: {}",
-                           chunk[0], SUPPORTED_TYPES.join(", "));
+                    miette::bail!(
+                        "Invalid option format: '{}'. Must include type, e.g. 'languages.rust.version:string'. Supported types: {}",
+                        chunk[0],
+                        SUPPORTED_TYPES.join(", ")
+                    );
                 }
 
                 let path = key_parts[0];
@@ -1365,10 +1453,10 @@ impl Devenv {
                         // Split by whitespace and format as a Nix list of package references
                         let items = chunk[1]
                             .split_whitespace()
-                            .map(|item| format!("pkgs.{}", item))
+                            .map(|item| format!("pkgs.{item}"))
                             .collect::<Vec<_>>()
                             .join(" ");
-                        format!("[ {} ]", items)
+                        format!("[ {items} ]")
                     }
                     _ => miette::bail!(
                         "Unsupported type: '{}'. Supported types: {}",
@@ -1381,9 +1469,9 @@ impl Devenv {
                 let final_value = if type_name == "pkgs" {
                     value
                 } else {
-                    format!("lib.mkForce {}", value)
+                    format!("lib.mkForce {value}")
                 };
-                cli_options.push_str(&format!("  {} = {};\n", path, final_value));
+                cli_options.push_str(&format!("  {path} = {final_value};\n"));
             }
 
             cli_options.push_str("}\n");
@@ -1417,7 +1505,7 @@ impl Devenv {
                 self.global_options
                     .profile
                     .iter()
-                    .map(|p| format!("\"{}\"", p))
+                    .map(|p| format!("\"{p}\""))
                     .collect::<Vec<_>>()
                     .join(" ")
             )
@@ -1431,22 +1519,11 @@ impl Devenv {
 
         let username = whoami::username();
 
-        // Detect git repository root
-        let git_root = std::process::Command::new("git")
-            .args(&["rev-parse", "--show-toplevel"])
-            .current_dir(&self.devenv_root)
-            .output()
-            .ok()
-            .and_then(|output| {
-                if output.status.success() {
-                    Some(format!(
-                        "\"{}\"",
-                        String::from_utf8_lossy(&output.stdout).trim()
-                    ))
-                } else {
-                    None
-                }
-            })
+        // Get git repository root from config (already detected during config load)
+        let git_root = config
+            .git_root
+            .as_ref()
+            .map(|path| format!("\"{}\"", path.display()))
             .unwrap_or_else(|| "null".to_string());
 
         let vars = indoc::formatdoc!(
@@ -1477,7 +1554,7 @@ impl Devenv {
             container_name = self
                 .container_name
                 .as_deref()
-                .map(|s| format!("\"{}\"", s))
+                .map(|s| format!("\"{s}\""))
                 .unwrap_or_else(|| "null".to_string()),
             devenv_tmpdir = self.devenv_tmp,
             devenv_runtime = self.devenv_runtime.display(),
@@ -1544,7 +1621,7 @@ fn confirm_overwrite(file: &Path, contents: String) -> Result<()> {
                 ChangeTag::Insert => "\x1b[32m+\x1b[0m",
                 ChangeTag::Equal => " ",
             };
-            eprint!("{}{}", sign, change);
+            eprint!("{sign}{change}");
         }
 
         let confirm = dialoguer::Confirm::new()
@@ -1692,7 +1769,7 @@ fn print_tasks_tree(tasks: &Vec<tasks::TaskConfig>) {
 
     // Print namespaced tasks grouped by namespace
     for (namespace, tasks_in_ns) in namespaces.iter() {
-        println!("{}:", namespace);
+        println!("{namespace}:");
 
         // Find roots within this namespace
         let mut ns_roots: Vec<&str> = Vec::new();
@@ -1701,7 +1778,7 @@ fn print_tasks_tree(tasks: &Vec<tasks::TaskConfig>) {
             if deps.is_empty()
                 || !deps
                     .iter()
-                    .any(|d| task_names.contains(d) && d.starts_with(&format!("{}:", namespace)))
+                    .any(|d| task_names.contains(d) && d.starts_with(&format!("{namespace}:")))
             {
                 ns_roots.push(&task.name);
             }
@@ -1790,9 +1867,9 @@ fn print_task_tree_with_namespace(
     // Print the current task with tree formatting, stripping the namespace prefix
     let connector = if is_last { "└── " } else { "├── " };
     let display_name = task_name
-        .strip_prefix(&format!("{}:", namespace))
+        .strip_prefix(&format!("{namespace}:"))
         .unwrap_or(task_name);
-    print!("{}{}{}", prefix, connector, display_name);
+    print!("{prefix}{connector}{display_name}");
 
     // Add additional info if available
     if let Some(task) = task_configs.get(task_name) {
@@ -1804,7 +1881,7 @@ fn print_task_tree_with_namespace(
 
         if !task.exec_if_modified.is_empty() {
             let files = task.exec_if_modified.join(", ");
-            extra_info.push(format!("watches: {}", files));
+            extra_info.push(format!("watches: {files}"));
         }
 
         if !extra_info.is_empty() {
@@ -1818,7 +1895,7 @@ fn print_task_tree_with_namespace(
     let children = task_dependents.get(task_name).cloned().unwrap_or_default();
     let mut children: Vec<_> = children
         .into_iter()
-        .filter(|t| task_configs.contains_key(t) && t.starts_with(&format!("{}:", namespace)))
+        .filter(|t| task_configs.contains_key(t) && t.starts_with(&format!("{namespace}:")))
         .collect();
     children.sort();
 
@@ -1855,7 +1932,7 @@ fn print_task_tree(
 
     // Print the current task with tree formatting
     let connector = if is_last { "└── " } else { "├── " };
-    print!("{}{}{}", prefix, connector, task_name);
+    print!("{prefix}{connector}{task_name}");
 
     // Add additional info if available
     if let Some(task) = task_configs.get(task_name) {
@@ -1867,7 +1944,7 @@ fn print_task_tree(
 
         if !task.exec_if_modified.is_empty() {
             let files = task.exec_if_modified.join(", ");
-            extra_info.push(format!("watches: {}", files));
+            extra_info.push(format!("watches: {files}"));
         }
 
         if !extra_info.is_empty() {

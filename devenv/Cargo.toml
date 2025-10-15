@@ -40,8 +40,8 @@ sha2.workspace = true
 sqlx.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
+tokio-shutdown.workspace = true
 tracing.workspace = true
-tracing-core.workspace = true
 tracing-subscriber.workspace = true
 tracing-indicatif.workspace = true
 indicatif.workspace = true
@@ -50,31 +50,32 @@ whoami.workspace = true
 xdg.workspace = true
 similar.workspace = true
 once_cell.workspace = true
+pathdiff.workspace = true
 shell-escape.workspace = true
 rmcp.workspace = true
 rmcp-macros.workspace = true
 async-trait.workspace = true
-secretspec = "0.3.1"
-secrecy = "0.10"
+secretspec.workspace = true
+secrecy.workspace = true
 
 # Optional snix dependencies
-snix-eval = { git = "https://github.com/cachix/snix", optional = true }
-snix-glue = { git = "https://github.com/cachix/snix", optional = true }
-snix-castore = { git = "https://github.com/cachix/snix", optional = true }
-snix-store = { git = "https://github.com/cachix/snix", optional = true }
-snix-build = { git = "https://github.com/cachix/snix", optional = true }
-nix-compat = { git = "https://github.com/cachix/snix", optional = true }
-nix-compat-derive = { git = "https://github.com/cachix/snix", optional = true }
+snix-eval = { workspace = true, optional = true }
+snix-glue = { workspace = true, optional = true }
+snix-castore = { workspace = true, optional = true }
+snix-store = { workspace = true, optional = true }
+snix-build = { workspace = true, optional = true }
+nix-compat = { workspace = true, optional = true }
+nix-compat-derive = { workspace = true, optional = true }
 
 [features]
 default = []
 integration-tests = []
 snix = [
-    "dep:snix-eval",
-    "dep:snix-glue",
-    "dep:snix-castore",
-    "dep:snix-store",
-    "dep:snix-build",
-    "dep:nix-compat",
-    "dep:nix-compat-derive",
+  "dep:nix-compat",
+  "dep:nix-compat-derive",
+  "dep:snix-build",
+  "dep:snix-castore",
+  "dep:snix-eval",
+  "dep:snix-glue",
+  "dep:snix-store",
 ]

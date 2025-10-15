@@ -3,9 +3,8 @@ pub mod db;
 pub mod internal_log;
 pub mod op;
 
-pub use command::{
-    supports_eval_caching, CachedCommand, EnvInputDesc, FileInputDesc, Input, Output,
-};
+pub use command::{EnvInputDesc, FileInputDesc, Input, NixCommand, Output, supports_eval_caching};
+pub use op::Op;
 
 /// Integration tests for caching behavior with Nix evaluation.
 ///
@@ -42,12 +41,10 @@ mod integration_tests {
 
     fn get_nix_binary() -> Result<String, Box<dyn std::error::Error>> {
         match env::var("DEVENV_NIX") {
-            Ok(path) => Ok(format!("{}/bin/nix", path)),
-            Err(_) => Err(format!(
-                "DEVENV_NIX environment variable not set. \
+            Ok(path) => Ok(format!("{path}/bin/nix")),
+            Err(_) => Err("DEVENV_NIX environment variable not set. \
                 Please set DEVENV_NIX to point to the store path of the custom Nix build. \
-                Example: DEVENV_NIX=/nix/store/...-nix-devenv-2.30.0... cargo test --features integration-tests"
-            ).into())
+                Example: DEVENV_NIX=/nix/store/...-nix-devenv-2.30.0... cargo test --features integration-tests".to_string().into())
         }
     }
 
@@ -75,9 +72,9 @@ mod integration_tests {
         expr: &str,
     ) -> Result<Output, Box<dyn std::error::Error>> {
         let nix_binary = get_nix_binary()?;
-        let cached_cmd = CachedCommand::new(pool);
+        let cached_cmd = NixCommand::new(pool);
         let mut cmd = Command::new(nix_binary);
-        cmd.args(&["eval", "--impure", "--expr", expr]);
+        cmd.args(["eval", "--impure", "--expr", expr]);
 
         Ok(cached_cmd.output(&mut cmd).await?)
     }
@@ -205,9 +202,11 @@ mod integration_tests {
         let test_env_value = "test_value_12345";
 
         // Set test environment variable
-        env::set_var(test_env_var, test_env_value);
+        unsafe {
+            env::set_var(test_env_var, test_env_value);
+        }
 
-        let nix_expr = format!(r#"builtins.getEnv "{}""#, test_env_var);
+        let nix_expr = format!(r#"builtins.getEnv "{test_env_var}""#);
 
         // Run nix eval with caching
         let output = run_nix_eval_cached(&pool, &nix_expr).await?;
@@ -226,7 +225,9 @@ mod integration_tests {
         );
 
         // Clean up
-        env::remove_var(test_env_var);
+        unsafe {
+            env::remove_var(test_env_var);
+        }
 
         Ok(())
     }
@@ -325,10 +326,12 @@ mod integration_tests {
         pool: sqlx::SqlitePool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let test_env_var = "TEST_CACHE_INVALIDATION_VAR";
-        let nix_expr = format!(r#"builtins.getEnv "{}""#, test_env_var);
+        let nix_expr = format!(r#"builtins.getEnv "{test_env_var}""#);
 
         // Set initial value
-        env::set_var(test_env_var, "initial_value");
+        unsafe {
+            env::set_var(test_env_var, "initial_value");
+        }
 
         // First run
         let output1 = run_nix_eval_cached(&pool, &nix_expr).await?;
@@ -342,7 +345,9 @@ mod integration_tests {
         assert!(output2.cache_hit);
 
         // Change environment variable
-        env::set_var(test_env_var, "changed_value");
+        unsafe {
+            env::set_var(test_env_var, "changed_value");
+        }
 
         // Third run - should invalidate cache
         let output3 = run_nix_eval_cached(&pool, &nix_expr).await?;
@@ -353,7 +358,9 @@ mod integration_tests {
         assert!(stdout3.contains("changed_value"));
 
         // Clean up
-        env::remove_var(test_env_var);
+        unsafe {
+            env::remove_var(test_env_var);
+        }
 
         Ok(())
     }
@@ -403,7 +410,9 @@ mod integration_tests {
         )?;
 
         // Set test environment variable
-        env::set_var("COMPLEX_TEST_VAR", "complex_value");
+        unsafe {
+            env::set_var("COMPLEX_TEST_VAR", "complex_value");
+        }
 
         // Create a complex Nix expression that uses multiple operations
         let nix_expr = format!(
@@ -433,7 +442,9 @@ mod integration_tests {
         assert_env_dependency_detected(&output, "COMPLEX_TEST_VAR");
 
         // Clean up
-        env::remove_var("COMPLEX_TEST_VAR");
+        unsafe {
+            env::remove_var("COMPLEX_TEST_VAR");
+        }
 
         Ok(())
     }

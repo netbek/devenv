@@ -26,18 +26,20 @@ pub enum CommandError {
 
 type OnStderr = Box<dyn Fn(&InternalLog) + Send>;
 
-pub struct CachedCommand<'a> {
+pub struct NixCommand<'a> {
     pool: &'a sqlx::SqlitePool,
+    enable_caching: bool,
     force_refresh: bool,
     extra_paths: Vec<PathBuf>,
     excluded_paths: Vec<PathBuf>,
     on_stderr: Option<OnStderr>,
 }
 
-impl<'a> CachedCommand<'a> {
+impl<'a> NixCommand<'a> {
     pub fn new(pool: &'a SqlitePool) -> Self {
         Self {
             pool,
+            enable_caching: true,
             force_refresh: false,
             extra_paths: Vec::new(),
             excluded_paths: Vec::new(),
@@ -67,6 +69,12 @@ impl<'a> CachedCommand<'a> {
         self
     }
 
+    /// Enable or disable eval caching.
+    pub fn enable_eval_cache(&mut self, enable: bool) -> &mut Self {
+        self.enable_caching = enable;
+        self
+    }
+
     pub fn on_stderr<F>(&mut self, f: F) -> &mut Self
     where
         F: Fn(&InternalLog) + Send + 'static,
@@ -80,16 +88,16 @@ impl<'a> CachedCommand<'a> {
     /// If the command has been run before and the files it depends on have not been modified,
     /// the cached output will be returned.
     pub async fn output(mut self, cmd: &'a mut Command) -> Result<Output, CommandError> {
-        let raw_cmd = format!("{:?}", cmd);
+        let raw_cmd = format!("{cmd:?}");
         let cmd_hash = compute_string_hash(&raw_cmd);
 
         // Check whether the command has been previously run and the files it depends on have not been changed.
-        if !self.force_refresh {
-            if let Ok(Some(output)) =
+        if self.enable_caching
+            && !self.force_refresh
+            && let Ok(Some(output)) =
                 query_cached_output(self.pool, &cmd_hash, &self.extra_paths).await
-            {
-                return Ok(output);
-            }
+        {
+            return Ok(output);
         }
 
         cmd.arg("-vv")
@@ -208,16 +216,19 @@ impl<'a> CachedCommand<'a> {
 
         let input_hash = Input::compute_input_hash(&inputs);
 
-        let _ = db::insert_command_with_inputs(
-            self.pool,
-            &raw_cmd,
-            &cmd_hash,
-            &input_hash,
-            &stdout,
-            &inputs,
-        )
-        .await
-        .map_err(CommandError::Sqlx)?;
+        // Only store results in cache if caching is enabled
+        if self.enable_caching {
+            let _ = db::insert_command_with_inputs(
+                self.pool,
+                &raw_cmd,
+                &cmd_hash,
+                &input_hash,
+                &stdout,
+                &inputs,
+            )
+            .await
+            .map_err(CommandError::Sqlx)?;
+        }
 
         Ok(Output {
             status,
@@ -339,12 +350,7 @@ impl FileInputDesc {
             Some(compute_string_hash(&paths))
         } else {
             compute_file_hash(&path)
-                .map_err(|e| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("Failed to compute file hash: {}", e),
-                    )
-                })
+                .map_err(|e| std::io::Error::other(format!("Failed to compute file hash: {e}")))
                 .ok()
         };
         let modified_at = truncate_to_seconds(
@@ -646,12 +652,8 @@ fn check_file_state(file: &FileInputDesc) -> io::Result<FileState> {
             .collect::<String>();
         compute_string_hash(&paths)
     } else {
-        compute_file_hash(&file.path).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to compute file hash: {}", e),
-            )
-        })?
+        compute_file_hash(&file.path)
+            .map_err(|e| std::io::Error::other(format!("Failed to compute file hash: {e}")))?
     };
 
     if Some(&new_hash) == file.content_hash.as_ref() {
@@ -713,12 +715,7 @@ mod test {
         let modified_at = metadata.modified().unwrap();
         let truncated_modified_at = truncate_to_seconds(modified_at).unwrap();
         let content_hash = compute_file_hash(&file_path)
-            .map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to compute file hash: {}", e),
-                )
-            })
+            .map_err(|e| std::io::Error::other(format!("Failed to compute file hash: {e}")))
             .unwrap();
 
         db::FileInputRow {

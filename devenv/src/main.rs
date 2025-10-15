@@ -1,15 +1,27 @@
 use clap::crate_version;
 use devenv::{
+    Devenv,
     cli::{Cli, Commands, ContainerCommand, InputsCommand, ProcessesCommand, TasksCommand},
-    config, log, Devenv,
+    config, log,
 };
-use miette::{bail, IntoDiagnostic, Result, WrapErr};
-use std::{env, os::unix::process::CommandExt, process::Command};
+use miette::{IntoDiagnostic, Result, WrapErr, bail};
+use std::{env, os::unix::process::CommandExt, process::Command, sync::Arc};
 use tempfile::TempDir;
+use tokio_shutdown::Shutdown;
 use tracing::{info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let shutdown = Shutdown::new();
+    shutdown.install_signals().await;
+
+    tokio::select! {
+        result = run_devenv(shutdown.clone()) => result,
+        _ = shutdown.wait_for_shutdown() => Ok(()),
+    }
+}
+
+async fn run_devenv(shutdown: Arc<Shutdown>) -> Result<()> {
     let cli = Cli::parse_and_resolve_options();
 
     let print_version = || {
@@ -38,7 +50,7 @@ async fn main() -> Result<()> {
         log::Level::default()
     };
 
-    log::init_tracing(level, cli.global_options.log_format);
+    log::init_tracing(level, cli.global_options.log_format, shutdown.clone());
 
     let mut config = config::Config::load()?;
     for input in cli.global_options.override_input.chunks_exact(2) {
@@ -53,9 +65,11 @@ async fn main() -> Result<()> {
     }
 
     let mut options = devenv::DevenvOptions {
-        global_options: Some(cli.global_options),
         config,
-        ..Default::default()
+        global_options: Some(cli.global_options),
+        devenv_root: None,
+        devenv_dotfile: None,
+        shutdown: shutdown.clone(),
     };
 
     // we let Drop delete the dir after all commands have ran
@@ -132,7 +146,9 @@ async fn main() -> Result<()> {
                     cmd
                 } else {
                     // Impossible. This handled by clap, but if we have no subcommand at this point, error out.
-                    bail!("No container subcommand provided. Use `devenv container build` or specify a command.")
+                    bail!(
+                        "No container subcommand provided. Use `devenv container build` or specify a command."
+                    )
                 }
             };
 

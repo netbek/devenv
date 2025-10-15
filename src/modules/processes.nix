@@ -43,10 +43,6 @@ let
   supportedImplementations = builtins.attrNames options.process.managers;
 
   implementation = config.process.manager.implementation;
-  envList =
-    lib.mapAttrsToList
-      (name: value: "${name}=${builtins.toJSON value}")
-      config.env;
 in
 {
   imports =
@@ -156,10 +152,16 @@ in
 
     procfile =
       pkgs.writeText "procfile" (lib.concatStringsSep "\n"
-        (lib.mapAttrsToList (name: process: "${name}: exec ${config.task.package}/bin/devenv-tasks run --mode all devenv:processes:${name}")
+        (lib.mapAttrsToList (name: process: "${name}: exec ${config.task.package}/bin/devenv-tasks run --task-file ${config.task.config} --mode all devenv:processes:${name}")
           config.processes));
 
     procfileEnv =
+      let
+        envList =
+          lib.mapAttrsToList
+            (name: value: "${name}=${builtins.toJSON value}")
+            config.env;
+      in
       pkgs.writeText "procfile-env" (lib.concatStringsSep "\n" envList);
 
     procfileScript = pkgs.writeShellScript "devenv-up" ''

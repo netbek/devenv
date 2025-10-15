@@ -154,7 +154,7 @@ impl InternalLog {
             } => {
                 let mut msg = String::new();
                 for field in fields {
-                    writeln!(msg, "{}", field).ok();
+                    writeln!(msg, "{field}").ok();
                 }
                 Some(Cow::Owned(msg.trim_end().to_string()))
             }
@@ -172,10 +172,9 @@ impl InternalLog {
             msg,
             ..
         } = self
+            && msg.starts_with("\u{1b}[31;1merror:")
         {
-            if msg.starts_with("\u{1b}[31;1merror:") {
-                return true;
-            }
+            return true;
         }
 
         false
@@ -188,10 +187,9 @@ impl InternalLog {
             msg,
             ..
         } = self
+            && msg.starts_with("trace:")
         {
-            if msg.starts_with("trace:") {
-                return true;
-            }
+            return true;
         }
 
         false
@@ -258,8 +256,8 @@ pub enum Field {
 impl Display for Field {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
-            Field::Int(i) => write!(f, "{}", i),
-            Field::String(s) => write!(f, "{}", s),
+            Field::Int(i) => write!(f, "{i}"),
+            Field::String(s) => write!(f, "{s}"),
         }
     }
 }

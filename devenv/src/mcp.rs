@@ -4,10 +4,9 @@ use crate::config::Config;
 use crate::devenv::{Devenv, DevenvOptions};
 use crate::nix_backend;
 use miette::Result;
-use rmcp::handler::server::tool::Parameters;
+use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{ServerCapabilities, ServerInfo};
-use rmcp::tool;
-use rmcp::{ServerHandler, ServiceExt};
+use rmcp::{ServerHandler, ServiceExt, tool, tool_router};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -113,7 +112,7 @@ impl DevenvMcpServer {
                 let name = if parts.len() > 2 {
                     format!("pkgs.{}", parts[2..].join("."))
                 } else {
-                    format!("pkgs.{}", key)
+                    format!("pkgs.{key}")
                 };
 
                 PackageInfo {
@@ -275,7 +274,7 @@ impl ServerHandler for DevenvMcpServer {
     }
 }
 
-#[tool]
+#[tool_router]
 impl DevenvMcpServer {
     #[tool(description = "List available packages in devenv")]
     async fn list_packages(&self, params: Parameters<ListPackagesRequest>) -> String {
@@ -463,7 +462,7 @@ mod tests {
         let packages = server.fetch_packages().await;
 
         // Should be able to fetch packages without error
-        assert!(packages.is_ok(), "Failed to fetch packages: {:?}", packages);
+        assert!(packages.is_ok(), "Failed to fetch packages: {packages:?}");
 
         let packages = packages.unwrap();
 
@@ -541,8 +540,7 @@ mod tests {
                 for known_option in known_options {
                     assert!(
                         options.iter().any(|opt| opt.name == known_option),
-                        "Expected option '{}' not found",
-                        known_option
+                        "Expected option '{known_option}' not found"
                     );
                 }
 
@@ -563,7 +561,7 @@ mod tests {
             }
             Err(e) => {
                 // Expected to fail in test environment
-                eprintln!("Expected failure in test environment: {:?}", e);
+                eprintln!("Expected failure in test environment: {e:?}");
                 eprintln!(
                     "This test requires running from a devenv project root with proper setup"
                 );

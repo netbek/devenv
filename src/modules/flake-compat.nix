@@ -23,7 +23,7 @@ let
   '';
 
   # Flake integration wrapper for devenv CLI
-  devenvFlakeWrapper = pkgs.writeScriptBin "devenv" ''
+  devenv-flake-wrapper = pkgs.writeScriptBin "devenv" ''
     #!/usr/bin/env bash
 
     # we want subshells to fail the program
@@ -45,6 +45,11 @@ let
         ${wrapWithNixDevelop "devenv-flake-test" "\"$@\""}
         ;;
 
+      tasks)
+        # Re-enter the shell to ensure we use the latest configuration
+        ${wrapWithNixDevelop "devenv-flake-tasks" "\"$@\""}
+        ;;
+
       version)
         echo "devenv: ${version}"
         ;;
@@ -58,34 +63,57 @@ let
         echo
         echo "Commands:"
         echo
-        echo "test            Runs tests"
-        echo "up              Starts processes in foreground. See http://devenv.sh/processes"
-        echo "version         Display devenv version"
+        echo "tasks           Manage and run tasks"
+        echo "test            Run tests"
+        echo "up              Start processes in the foreground. See http://devenv.sh/processes"
+        echo "version         Display the devenv version"
         echo
         exit 1
     esac
   '';
+
+  # `devenv up` helper command
+  devenv-flake-up =
+    pkgs.writeShellScriptBin "devenv-flake-up" ''
+      ${lib.optionalString (config.processes == { }) ''
+        echo "No 'processes' option defined: https://devenv.sh/processes/" >&2
+        exit 1
+      ''}
+      exec ${config.procfileScript} "$@"
+    '';
+
+  # `devenv test` helper command
+  devenv-flake-test =
+    pkgs.writeShellScriptBin "devenv-flake-test" ''
+      echo "• Testing ..." >&2
+      exec ${config.test} "$@"
+    '';
+
+  # `devenv tasks` helper command
+  devenv-flake-tasks =
+    pkgs.writeShellScriptBin "devenv-flake-tasks" ''
+      exec ${config.task.package}/bin/devenv-tasks "$@"
+    '';
+
+  devenvFlakeCompat = pkgs.symlinkJoin {
+    name = "devenv-flake-compat";
+    paths = [
+      devenv-flake-wrapper
+      devenv-flake-up
+      devenv-flake-test
+      devenv-flake-tasks
+    ];
+  };
 in
 {
   config = lib.mkIf config.devenv.flakesIntegration {
     env.DEVENV_FLAKE_SHELL = shellName;
 
-    packages = [
-      # Flake integration wrapper
-      devenvFlakeWrapper
-
-      # Add devenv-flake-up and devenv-flake-test scripts
-      (pkgs.writeShellScriptBin "devenv-flake-up" ''
-        ${lib.optionalString (config.processes == { }) ''
-          echo "No 'processes' option defined: https://devenv.sh/processes/" >&2
-          exit 1
-        ''}
-        exec ${config.procfileScript} "$@"
-      '')
-
-      (pkgs.writeShellScriptBin "devenv-flake-test" ''
-        exec ${config.test} "$@"
-      '')
-    ];
+    # Add the flake command helpers directly to the path.
+    # This is to avoid accidentally adding their paths to env vars, like DEVENV_PROFILE.
+    # If that happens and a profile command is provided the full env, we will create a recursive dependency between the env and the procfile command.
+    enterShell = ''
+      export PATH=${devenvFlakeCompat}/bin:$PATH
+    '';
   };
 }

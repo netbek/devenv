@@ -1,9 +1,9 @@
-use clap::{crate_version, Parser};
+use clap::{Parser, crate_version};
 use devenv::{
     default_system,
     log::{self, LogFormat},
 };
-use miette::{bail, IntoDiagnostic, Result};
+use miette::{IntoDiagnostic, Result, bail};
 use similar::{ChangeTag, TextDiff};
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
@@ -88,7 +88,8 @@ async fn main() -> Result<()> {
         log::Level::default()
     };
 
-    log::init_tracing(level, cli.log_format);
+    let shutdown = tokio_shutdown::Shutdown::new();
+    log::init_tracing(level, cli.log_format, shutdown);
 
     let description = if !cli.description.is_empty() {
         Some(cli.description.join(" "))
@@ -131,10 +132,10 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
 
-            if let Ok(stderr) = String::from_utf8(git_output.stderr) {
-                if !stderr.is_empty() {
-                    warn!("{}", &stderr);
-                }
+            if let Ok(stderr) = String::from_utf8(git_output.stderr)
+                && !stderr.is_empty()
+            {
+                warn!("{}", &stderr);
             }
 
             let body = reqwest::Body::wrap_stream(streamreader);
@@ -218,7 +219,7 @@ fn confirm_overwrite(file: &Path, contents: String) -> Result<()> {
                 ChangeTag::Insert => "\x1b[32m+\x1b[0m",
                 ChangeTag::Equal => " ",
             };
-            print!("{}{}", sign, change);
+            print!("{sign}{change}");
         }
 
         let confirm = dialoguer::Confirm::new()

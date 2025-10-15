@@ -1,11 +1,32 @@
 { pkgs, lib, config, ... }@inputs:
 let
   types = lib.types;
-  devenv-tasks = pkgs.callPackage ./../../package.nix {
-    build_tasks = true;
-    cachix = null;
-    inherit (inputs.nix.packages.${pkgs.stdenv.system}) nix;
-  };
+
+  # Attempt to evaluate devenv-tasks using the exact nixpkgs used by the root devenv flake.
+  # If the locked input is not what we expect, fall back to evaluating with the user's nixpkgs.
+  #
+  # In theory:
+  #   - The tasks binary will be built by CI and uploaded to devenv.cachix.org
+  #   - Only bumps to the nixpkgs in the root devenv flake will trigger a re-eval of devenv-tasks
+  devenv-tasks =
+    let
+      lock = builtins.fromJSON (builtins.readFile ./../../flake.lock);
+      lockedNixpkgs = lock.nodes.nixpkgs.locked;
+      devenvPkgs =
+        if lockedNixpkgs.type == "github" then
+          let
+            source = pkgs.fetchFromGitHub {
+              inherit (lockedNixpkgs) owner repo rev;
+              hash = lock.nodes.nixpkgs.locked.narHash;
+            };
+          in
+          import source { system = pkgs.stdenv.system; }
+        else
+          pkgs;
+      workspace = devenvPkgs.callPackage ./../../workspace.nix { };
+    in
+    workspace.devenv-tasks-fast-build;
+
   taskType = types.submodule
     ({ name, config, ... }:
       let
@@ -144,8 +165,6 @@ in
   };
 
   config = {
-    env.DEVENV_TASKS = builtins.toJSON tasksJSON;
-
     assertions = [
       {
         assertion = lib.all (task: task.package.meta.mainProgram == "bash" || task.binary == "bash" || task.exports == [ ]) (lib.attrValues config.tasks);
@@ -157,12 +176,14 @@ in
       }
     ];
 
+    env.DEVENV_TASKS = builtins.toJSON tasksJSON;
+    env.DEVENV_TASK_FILE = config.task.config;
+    task.config = (pkgs.formats.json { }).generate "tasks.json" tasksJSON;
+
     infoSections."tasks" =
       lib.mapAttrsToList
         (name: task: "${name}: ${task.description} (${if task.command == null then "no command" else task.command})")
         config.tasks;
-
-    task.config = (pkgs.formats.json { }).generate "tasks.json" tasksJSON;
 
     tasks = {
       "devenv:enterShell" = {

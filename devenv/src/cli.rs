@@ -1,5 +1,5 @@
 use crate::log::LogFormat;
-use clap::{crate_version, Parser, Subcommand};
+use clap::{Parser, Subcommand, crate_version};
 use devenv_tasks::RunMode;
 use std::path::PathBuf;
 use tracing::error;
@@ -174,6 +174,8 @@ pub struct GlobalOptions {
         short = 'P',
         long,
         global = true,
+        num_args = 1,
+        action = clap::ArgAction::Append,
         help = "Activate one or more profiles defined in devenv.nix",
         long_help = "Activate one or more profiles defined in devenv.nix.\n\nProfiles allow you to define different configurations that can be merged with your base configuration.\n\nSee https://devenv.sh/profiles for more information.\n\nExamples:\n  --profile python-3.14\n  --profile backend --profile fast-startup"
     )]
@@ -312,9 +314,7 @@ pub enum Commands {
         command: InputsCommand,
     },
 
-    #[command(
-        about = "Launch an interactive environment for inspecting the devenv configuration."
-    )]
+    #[command(about = "Launch an interactive environment for inspecting the devenv configuration.")]
     Repl {},
 
     #[command(

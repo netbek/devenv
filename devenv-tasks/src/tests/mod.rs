@@ -11,6 +11,10 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 use tokio::fs::{self, File};
+use tokio_shutdown::Shutdown;
+
+#[cfg(test)]
+use proptest::prelude::*;
 
 #[tokio::test]
 async fn test_task_name() -> Result<(), Error> {
@@ -37,7 +41,7 @@ async fn test_task_name() -> Result<(), Error> {
         }))
         .unwrap();
         assert_matches!(
-            Tasks::builder(config, VerbosityLevel::Verbose)
+            Tasks::builder(config, VerbosityLevel::Verbose, Shutdown::new())
                 .with_db_path(db_path.clone())
                 .build()
                 .await,
@@ -62,7 +66,7 @@ async fn test_task_name() -> Result<(), Error> {
         }))
         .unwrap();
         assert_matches!(
-            Tasks::builder(config, VerbosityLevel::Verbose)
+            Tasks::builder(config, VerbosityLevel::Verbose, Shutdown::new())
                 .with_db_path(db_path.clone())
                 .build()
                 .await,
@@ -117,6 +121,7 @@ async fn test_basic_tasks() -> Result<(), Error> {
         }))
         .unwrap(),
         VerbosityLevel::Verbose,
+        Shutdown::new(),
     )
     .with_db_path(db_path)
     .build()
@@ -161,6 +166,7 @@ async fn test_tasks_cycle() -> Result<(), Error> {
         }))
         .unwrap(),
         VerbosityLevel::Verbose,
+        Shutdown::new(),
     )
     .with_db_path(db_path)
     .build()
@@ -170,8 +176,7 @@ async fn test_tasks_cycle() -> Result<(), Error> {
         Ok(())
     } else {
         Err(Error::TaskNotFound(format!(
-            "Expected Error::CycleDetected, got {:?}",
-            result
+            "Expected Error::CycleDetected, got {result:?}"
         )))
     }
 }
@@ -221,7 +226,7 @@ echo 'Task 2 is running' && echo 'Task 2 completed'
     }))
     .unwrap();
 
-    let tasks1 = Tasks::builder(config1, VerbosityLevel::Verbose)
+    let tasks1 = Tasks::builder(config1, VerbosityLevel::Verbose, Shutdown::new())
         .with_db_path(db_path.clone())
         .build()
         .await?;
@@ -230,14 +235,14 @@ echo 'Task 2 is running' && echo 'Task 2 completed'
     assert_eq!(tasks1.tasks_order.len(), 1);
 
     let status = &tasks1.graph[tasks1.tasks_order[0]].read().await.status;
-    println!("Task 1 status: {:?}", status);
+    println!("Task 1 status: {status:?}");
 
     match status {
         TaskStatus::Completed(TaskCompleted::Skipped(Skipped::Cached(_))) => {
             // Expected case
         }
         other => {
-            panic!("Expected Skipped status for task 1, got: {:?}", other);
+            panic!("Expected Skipped status for task 1, got: {other:?}");
         }
     }
 
@@ -258,7 +263,7 @@ echo 'Task 2 is running' && echo 'Task 2 completed'
     }))
     .unwrap();
 
-    let tasks2 = Tasks::builder(config2, VerbosityLevel::Verbose)
+    let tasks2 = Tasks::builder(config2, VerbosityLevel::Verbose, Shutdown::new())
         .with_db_path(db_path2)
         .build()
         .await?;
@@ -267,14 +272,14 @@ echo 'Task 2 is running' && echo 'Task 2 completed'
     assert_eq!(tasks2.tasks_order.len(), 1);
 
     let status2 = &tasks2.graph[tasks2.tasks_order[0]].read().await.status;
-    println!("Task 2 status: {:?}", status2);
+    println!("Task 2 status: {status2:?}");
 
     match status2 {
         TaskStatus::Completed(TaskCompleted::Success(_, _)) => {
             // Expected case
         }
         other => {
-            panic!("Expected Success status for task 2, got: {:?}", other);
+            panic!("Expected Success status for task 2, got: {other:?}");
         }
     }
 
@@ -327,7 +332,7 @@ exit 0
     }))
     .unwrap();
 
-    let tasks1 = Tasks::builder(config1, VerbosityLevel::Verbose)
+    let tasks1 = Tasks::builder(config1, VerbosityLevel::Verbose, Shutdown::new())
         .with_db_path(db_path.clone())
         .build()
         .await?;
@@ -335,7 +340,7 @@ exit 0
 
     // Print the status and outputs for debugging
     let status1 = &tasks1.graph[tasks1.tasks_order[0]].read().await.status;
-    println!("First run status: {:?}", status1);
+    println!("First run status: {status1:?}");
     println!("First run outputs: {:?}", outputs1.0);
 
     // Verify output was captured
@@ -345,7 +350,7 @@ exit 0
         .and_then(|v| v.get("result"))
         .and_then(|v| v.as_str());
 
-    println!("First run output value: {:?}", output_value);
+    println!("First run output value: {output_value:?}");
 
     assert_eq!(
         output_value,
@@ -367,7 +372,7 @@ exit 0
     }))
     .unwrap();
 
-    let tasks2 = Tasks::builder(config2, VerbosityLevel::Verbose)
+    let tasks2 = Tasks::builder(config2, VerbosityLevel::Verbose, Shutdown::new())
         .with_db_path(db_path)
         .build()
         .await?;
@@ -375,7 +380,7 @@ exit 0
 
     // Print the status and outputs for debugging
     let status2 = &tasks2.graph[tasks2.tasks_order[0]].read().await.status;
-    println!("Second run status: {:?}", status2);
+    println!("Second run status: {status2:?}");
     println!("Second run outputs: {:?}", outputs2.0);
 
     // Print the output value for debugging
@@ -385,7 +390,7 @@ exit 0
         .and_then(|v| v.get("result"))
         .and_then(|v| v.as_str());
 
-    println!("Second run output value: {:?}", output_value2);
+    println!("Second run output value: {output_value2:?}");
 
     // We allow the test to pass if the output is either:
     // 1. The originally cached value ("task_executed") - ideal case
@@ -449,7 +454,7 @@ echo "Task executed successfully"
     }))
     .unwrap();
 
-    let tasks = Tasks::builder(config, VerbosityLevel::Verbose)
+    let tasks = Tasks::builder(config, VerbosityLevel::Verbose, Shutdown::new())
         .with_db_path(db_path.clone())
         .build()
         .await?;
@@ -459,7 +464,7 @@ echo "Task executed successfully"
 
     // Print status for debugging
     let status = &tasks.graph[tasks.tasks_order[0]].read().await.status;
-    println!("First run status: {:?}", status);
+    println!("First run status: {status:?}");
 
     // Check task status - should be Success
     match &tasks.graph[tasks.tasks_order[0]].read().await.status {
@@ -467,7 +472,7 @@ echo "Task executed successfully"
             // This is the expected case - test passes
         }
         other => {
-            panic!("Expected Success status on first run, got: {:?}", other);
+            panic!("Expected Success status on first run, got: {other:?}");
         }
     }
 
@@ -497,7 +502,7 @@ echo "Task executed successfully"
     }))
     .unwrap();
 
-    let tasks2 = Tasks::builder(config2, VerbosityLevel::Verbose)
+    let tasks2 = Tasks::builder(config2, VerbosityLevel::Verbose, Shutdown::new())
         .with_db_path(db_path.clone())
         .build()
         .await?;
@@ -505,7 +510,7 @@ echo "Task executed successfully"
 
     // Print status for debugging
     let status2 = &tasks2.graph[tasks2.tasks_order[0]].read().await.status;
-    println!("Second run status: {:?}", status2);
+    println!("Second run status: {status2:?}");
 
     // For the second run, expect it to be skipped
     if let TaskStatus::Completed(TaskCompleted::Skipped(_)) =
@@ -552,7 +557,7 @@ echo "Task executed successfully"
     }))
     .unwrap();
 
-    let tasks3 = Tasks::builder(config3, VerbosityLevel::Verbose)
+    let tasks3 = Tasks::builder(config3, VerbosityLevel::Verbose, Shutdown::new())
         .with_db_path(db_path)
         .build()
         .await?;
@@ -560,7 +565,7 @@ echo "Task executed successfully"
 
     // Print status for debugging
     let status3 = &tasks3.graph[tasks3.tasks_order[0]].read().await.status;
-    println!("Third run status: {:?}", status3);
+    println!("Third run status: {status3:?}");
 
     // Check that the task was executed
     match &tasks3.graph[tasks3.tasks_order[0]].read().await.status {
@@ -568,10 +573,7 @@ echo "Task executed successfully"
             // This is the expected case
         }
         other => {
-            panic!(
-                "Expected Success status on third run after file modification, got: {:?}",
-                other
-            );
+            panic!("Expected Success status on third run after file modification, got: {other:?}");
         }
     }
 
@@ -635,7 +637,7 @@ echo "Multiple files task executed successfully"
     .unwrap();
 
     // Create tasks with multiple files in exec_if_modified
-    let tasks = Tasks::builder(config1, VerbosityLevel::Verbose)
+    let tasks = Tasks::builder(config1, VerbosityLevel::Verbose, Shutdown::new())
         .with_db_path(db_path.clone())
         .build()
         .await?;
@@ -673,7 +675,7 @@ echo "Multiple files task executed successfully"
     }))
     .unwrap();
 
-    let tasks = Tasks::builder(config2, VerbosityLevel::Verbose)
+    let tasks = Tasks::builder(config2, VerbosityLevel::Verbose, Shutdown::new())
         .with_db_path(db_path.clone())
         .build()
         .await?;
@@ -705,7 +707,7 @@ echo "Multiple files task executed successfully"
     }))
     .unwrap();
 
-    let tasks2 = Tasks::builder(config3, VerbosityLevel::Verbose)
+    let tasks2 = Tasks::builder(config3, VerbosityLevel::Verbose, Shutdown::new())
         .with_db_path(db_path.clone())
         .build()
         .await?;
@@ -739,7 +741,7 @@ echo "Multiple files task executed successfully"
     }))
     .unwrap();
 
-    let tasks = Tasks::builder(config4, VerbosityLevel::Verbose)
+    let tasks = Tasks::builder(config4, VerbosityLevel::Verbose, Shutdown::new())
         .with_db_path(db_path.clone())
         .build()
         .await?;
@@ -779,7 +781,7 @@ echo "Multiple files task executed successfully"
     }))
     .unwrap();
 
-    let tasks = Tasks::builder(config5, VerbosityLevel::Verbose)
+    let tasks = Tasks::builder(config5, VerbosityLevel::Verbose, Shutdown::new())
         .with_db_path(db_path.clone())
         .build()
         .await?;
@@ -853,7 +855,7 @@ echo "Task executed successfully"
         .unwrap();
 
         // Create the tasks with explicit db path
-        let tasks1 = Tasks::builder(config1, VerbosityLevel::Verbose)
+        let tasks1 = Tasks::builder(config1, VerbosityLevel::Verbose, Shutdown::new())
             .with_db_path(db_path.clone())
             .build()
             .await?;
@@ -863,7 +865,7 @@ echo "Task executed successfully"
 
         // Print the status and outputs for debugging
         let status1 = &tasks1.graph[tasks1.tasks_order[0]].read().await.status;
-        println!("First run status: {:?}", status1);
+        println!("First run status: {status1:?}");
         println!("First run outputs: {:?}", outputs1.0);
 
         // Verify output is stored properly the first time
@@ -873,7 +875,7 @@ echo "Task executed successfully"
             .and_then(|v| v.get("result"))
             .and_then(|v| v.as_str());
 
-        println!("First run output value: {:?}", output_value1);
+        println!("First run output value: {output_value1:?}");
 
         assert_eq!(
             output_value1,
@@ -899,7 +901,7 @@ echo "Task executed successfully"
         .unwrap();
 
         // Create the tasks with explicit db path
-        let tasks2 = Tasks::builder(config2, VerbosityLevel::Verbose)
+        let tasks2 = Tasks::builder(config2, VerbosityLevel::Verbose, Shutdown::new())
             .with_db_path(db_path.clone())
             .build()
             .await?;
@@ -907,7 +909,7 @@ echo "Task executed successfully"
 
         // Print the status and outputs for debugging
         let status2 = &tasks2.graph[tasks2.tasks_order[0]].read().await.status;
-        println!("Second run status: {:?}", status2);
+        println!("Second run status: {status2:?}");
         println!("Second run outputs: {:?}", outputs2.0);
 
         // Check task status for debugging - we're more relaxed here since CI can be flaky
@@ -926,7 +928,7 @@ echo "Task executed successfully"
             .and_then(|v| v.get("result"))
             .and_then(|v| v.as_str());
 
-        println!("Second run output value: {:?}", output_value2);
+        println!("Second run output value: {output_value2:?}");
 
         // We're relaxing this check due to the race conditions in CI
         let valid_output = match output_value2 {
@@ -966,7 +968,7 @@ echo "Task executed successfully"
         .unwrap();
 
         // Create the tasks with explicit db path
-        let tasks3 = Tasks::builder(config3, VerbosityLevel::Verbose)
+        let tasks3 = Tasks::builder(config3, VerbosityLevel::Verbose, Shutdown::new())
             .with_db_path(db_path)
             .build()
             .await?;
@@ -974,7 +976,7 @@ echo "Task executed successfully"
 
         // Print the status and outputs for debugging
         let status3 = &tasks3.graph[tasks3.tasks_order[0]].read().await.status;
-        println!("Third run status: {:?}", status3);
+        println!("Third run status: {status3:?}");
         println!("Third run outputs: {:?}", outputs3.0);
 
         // Check it was executed - should be Success because the file was modified
@@ -984,8 +986,7 @@ echo "Task executed successfully"
             }
             other => {
                 panic!(
-                    "Expected Success status on third run after file modification, got: {:?}",
-                    other
+                    "Expected Success status on third run after file modification, got: {other:?}"
                 );
             }
         }
@@ -997,7 +998,7 @@ echo "Task executed successfully"
             .and_then(|v| v.get("result"))
             .and_then(|v| v.as_str());
 
-        println!("Third run output value: {:?}", output_value3);
+        println!("Third run output value: {output_value3:?}");
 
         assert_eq!(
             output_value3,
@@ -1066,7 +1067,7 @@ echo "Task completed and modified the file"
     };
 
     // Create and run the tasks
-    let tasks = Tasks::builder(config, VerbosityLevel::Verbose)
+    let tasks = Tasks::builder(config, VerbosityLevel::Verbose, Shutdown::new())
         .with_db_path(db_path.clone())
         .build()
         .await?;
@@ -1123,7 +1124,7 @@ echo "Task completed and modified the file"
     }))
     .unwrap();
 
-    let tasks2 = Tasks::builder(config2, VerbosityLevel::Verbose)
+    let tasks2 = Tasks::builder(config2, VerbosityLevel::Verbose, Shutdown::new())
         .with_db_path(db_path)
         .build()
         .await?;
@@ -1137,7 +1138,7 @@ echo "Task completed and modified the file"
             println!("Task was correctly skipped on second run");
         }
         other => {
-            println!("Warning: Task not skipped as expected, got: {:?}", other);
+            println!("Warning: Task not skipped as expected, got: {other:?}");
             // We're relaxing this assertion for CI stability
         }
     }
@@ -1202,7 +1203,7 @@ exit 1
     };
 
     // Create and run the tasks
-    let tasks = Tasks::builder(config, VerbosityLevel::Verbose)
+    let tasks = Tasks::builder(config, VerbosityLevel::Verbose, Shutdown::new())
         .with_db_path(db_path.clone())
         .build()
         .await?;
@@ -1216,7 +1217,7 @@ exit 1
             println!("Task correctly failed as expected");
         }
         other => {
-            panic!("Expected Failed status, got: {:?}", other);
+            panic!("Expected Failed status, got: {other:?}");
         }
     }
 
@@ -1279,6 +1280,7 @@ async fn test_nonexistent_script() -> Result<(), Error> {
         }))
         .unwrap(),
         VerbosityLevel::Verbose,
+        Shutdown::new(),
     )
     .with_db_path(db_path.clone())
     .build()
@@ -1327,6 +1329,7 @@ async fn test_status_without_command() -> Result<(), Error> {
         }))
         .unwrap(),
         VerbosityLevel::Verbose,
+        Shutdown::new(),
     )
     .with_db_path(db_path)
     .build()
@@ -1370,7 +1373,7 @@ async fn test_run_mode() -> Result<(), Error> {
 
     // Single task
     {
-        let tasks = Tasks::builder(config.clone(), VerbosityLevel::Verbose)
+        let tasks = Tasks::builder(config.clone(), VerbosityLevel::Verbose, Shutdown::new())
             .with_db_path(db_path.clone())
             .build()
             .await?;
@@ -1391,7 +1394,7 @@ async fn test_run_mode() -> Result<(), Error> {
             run_mode: RunMode::Before,
             ..config.clone()
         };
-        let tasks = Tasks::builder(config, VerbosityLevel::Verbose)
+        let tasks = Tasks::builder(config, VerbosityLevel::Verbose, Shutdown::new())
             .with_db_path(db_path.clone())
             .build()
             .await?;
@@ -1412,7 +1415,7 @@ async fn test_run_mode() -> Result<(), Error> {
             run_mode: RunMode::After,
             ..config.clone()
         };
-        let tasks = Tasks::builder(config, VerbosityLevel::Verbose)
+        let tasks = Tasks::builder(config, VerbosityLevel::Verbose, Shutdown::new())
             .with_db_path(db_path.clone())
             .build()
             .await?;
@@ -1433,7 +1436,7 @@ async fn test_run_mode() -> Result<(), Error> {
             run_mode: RunMode::All,
             ..config.clone()
         };
-        let tasks = Tasks::builder(config, VerbosityLevel::Verbose)
+        let tasks = Tasks::builder(config, VerbosityLevel::Verbose, Shutdown::new())
             .with_db_path(db_path.clone())
             .build()
             .await?;
@@ -1485,6 +1488,7 @@ async fn test_before_tasks() -> Result<(), Error> {
         }))
         .unwrap(),
         VerbosityLevel::Verbose,
+        Shutdown::new(),
     )
     .with_db_path(db_path)
     .build()
@@ -1537,6 +1541,7 @@ async fn test_after_tasks() -> Result<(), Error> {
         }))
         .unwrap(),
         VerbosityLevel::Verbose,
+        Shutdown::new(),
     )
     .with_db_path(db_path.clone())
     .build()
@@ -1590,6 +1595,7 @@ async fn test_before_and_after_tasks() -> Result<(), Error> {
         }))
         .unwrap(),
         VerbosityLevel::Verbose,
+        Shutdown::new(),
     )
     .with_db_path(db_path)
     .build()
@@ -1643,6 +1649,7 @@ async fn test_transitive_dependencies() -> Result<(), Error> {
         }))
         .unwrap(),
         VerbosityLevel::Verbose,
+        Shutdown::new(),
     )
     .with_db_path(db_path)
     .build()
@@ -1696,6 +1703,7 @@ async fn test_non_root_before_and_after() -> Result<(), Error> {
         }))
         .unwrap(),
         VerbosityLevel::Verbose,
+        Shutdown::new(),
     )
     .with_db_path(db_path)
     .build()
@@ -1758,6 +1766,7 @@ async fn test_namespace_matching() -> Result<(), Error> {
         }))
         .unwrap(),
         VerbosityLevel::Verbose,
+        Shutdown::new(),
     )
     .with_db_path(db_path.clone())
     .build()
@@ -1805,6 +1814,7 @@ async fn test_namespace_matching() -> Result<(), Error> {
         }))
         .unwrap(),
         VerbosityLevel::Verbose,
+        Shutdown::new(),
     )
     .with_db_path(db_path.clone())
     .build()
@@ -1848,6 +1858,7 @@ async fn test_namespace_matching() -> Result<(), Error> {
         }))
         .unwrap(),
         VerbosityLevel::Verbose,
+        Shutdown::new(),
     )
     .with_db_path(db_path.clone())
     .build()
@@ -1902,6 +1913,7 @@ async fn test_namespace_matching() -> Result<(), Error> {
         }))
         .unwrap(),
         VerbosityLevel::Verbose,
+        Shutdown::new(),
     )
     .with_db_path(db_path.clone())
     .build()
@@ -1945,6 +1957,7 @@ async fn test_namespace_matching() -> Result<(), Error> {
         }))
         .unwrap(),
         VerbosityLevel::Verbose,
+        Shutdown::new(),
     )
     .with_db_path(db_path.clone())
     .build()
@@ -2007,6 +2020,7 @@ async fn test_dependency_failure() -> Result<(), Error> {
         }))
         .unwrap(),
         VerbosityLevel::Verbose,
+        Shutdown::new(),
     )
     .with_db_path(db_path)
     .build()
@@ -2071,6 +2085,7 @@ exit 0
         }))
         .unwrap(),
         VerbosityLevel::Verbose,
+        Shutdown::new(),
     )
     .with_db_path(db_path)
     .build()
@@ -2136,6 +2151,7 @@ echo '{"key": "value3"}' > $DEVENV_TASK_OUTPUT_FILE
         }))
         .unwrap(),
         VerbosityLevel::Verbose,
+        Shutdown::new(),
     )
     .with_db_path(db_path)
     .build()
@@ -2198,6 +2214,7 @@ fi
         }))
         .unwrap(),
         VerbosityLevel::Verbose,
+        Shutdown::new(),
     )
     .with_db_path(db_path)
     .build()
@@ -2253,12 +2270,13 @@ async fn test_namespace_resolution_edge_cases() -> Result<(), Error> {
         }))
         .unwrap(),
         VerbosityLevel::Verbose,
+        Shutdown::new(),
     )
     .with_db_path(db_path.clone())
     .build()
     .await;
 
-    assert_matches!(result, Err(Error::TaskNotFound(name)) if name == "");
+    assert_matches!(result, Err(Error::TaskNotFound(name)) if name.is_empty());
 
     // Test whitespace-only namespace
     let result = Tasks::builder(
@@ -2274,6 +2292,7 @@ async fn test_namespace_resolution_edge_cases() -> Result<(), Error> {
         }))
         .unwrap(),
         VerbosityLevel::Verbose,
+        Shutdown::new(),
     )
     .with_db_path(db_path.clone())
     .build()
@@ -2295,6 +2314,7 @@ async fn test_namespace_resolution_edge_cases() -> Result<(), Error> {
         }))
         .unwrap(),
         VerbosityLevel::Verbose,
+        Shutdown::new(),
     )
     .with_db_path(db_path.clone())
     .build()
@@ -2316,6 +2336,7 @@ async fn test_namespace_resolution_edge_cases() -> Result<(), Error> {
         }))
         .unwrap(),
         VerbosityLevel::Verbose,
+        Shutdown::new(),
     )
     .with_db_path(db_path.clone())
     .build()
@@ -2337,6 +2358,7 @@ async fn test_namespace_resolution_edge_cases() -> Result<(), Error> {
         }))
         .unwrap(),
         VerbosityLevel::Verbose,
+        Shutdown::new(),
     )
     .with_db_path(db_path.clone())
     .build()
@@ -2362,6 +2384,7 @@ async fn test_namespace_resolution_edge_cases() -> Result<(), Error> {
         }))
         .unwrap(),
         VerbosityLevel::Verbose,
+        Shutdown::new(),
     )
     .with_db_path(db_path.clone())
     .build()
@@ -2396,6 +2419,7 @@ async fn test_namespace_resolution_edge_cases() -> Result<(), Error> {
         }))
         .unwrap(),
         VerbosityLevel::Verbose,
+        Shutdown::new(),
     )
     .with_db_path(db_path)
     .build()
@@ -2449,4 +2473,268 @@ fn create_basic_script(tag: &str) -> std::io::Result<tempfile::TempPath> {
     create_script(&format!(
         "#!/bin/sh\necho 'Task {tag} is running' && sleep 0.1 && echo 'Task {tag} completed'"
     ))
+}
+
+// Property-based testing generators and helpers
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+
+    // Generator for valid task name segments (alphanumeric, underscore, hyphen)
+    fn valid_segment() -> impl Strategy<Value = String> {
+        prop::string::string_regex("[a-zA-Z0-9_-]{1,10}")
+            .unwrap()
+            .prop_filter("Non-empty segment", |s| !s.is_empty())
+    }
+
+    // Generator for valid task names (namespace:task or namespace:subnamespace:task)
+    fn valid_task_name() -> impl Strategy<Value = String> {
+        prop::collection::vec(valid_segment(), 2..=4)
+            .prop_map(|segments| segments.join(":"))
+            .prop_filter("Valid task name", |name| {
+                // Ensure it matches the validation requirements from tasks.rs
+                !name.is_empty()
+                    && name.contains(':')
+                    && name.split(':').count() >= 2
+                    && !name.starts_with(':')
+                    && !name.ends_with(':')
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == ':' || c == '_' || c == '-')
+            })
+    }
+
+    // Generator for task hierarchies (collection of valid task names)
+    fn task_hierarchy() -> impl Strategy<Value = Vec<String>> {
+        prop::collection::vec(valid_task_name(), 1..=15).prop_filter(
+            "No duplicate task names",
+            |tasks| {
+                let mut seen = std::collections::HashSet::new();
+                tasks.iter().all(|task| seen.insert(task))
+            },
+        )
+    }
+
+    // Helper function to extract namespace matching logic
+    // Accepts a db_path to allow reuse across multiple calls
+    pub async fn get_matching_task_names(
+        task_names: &[String],
+        query: &str,
+        db_path: &std::path::Path,
+    ) -> Result<Vec<String>, Error> {
+        // Create dummy scripts for all tasks
+        let dummy_script = create_basic_script("dummy").unwrap();
+        let script_path = dummy_script.to_str().unwrap();
+
+        // Build task configs
+        let tasks: Vec<_> = task_names
+            .iter()
+            .map(|name| {
+                json!({
+                    "name": name,
+                    "command": script_path
+                })
+            })
+            .collect();
+
+        let config = Config::try_from(json!({
+            "roots": [query],
+            "run_mode": "all",
+            "tasks": tasks
+        }))
+        .unwrap();
+
+        let tasks_result = Tasks::builder(config, VerbosityLevel::Quiet, Shutdown::new())
+            .with_db_path(db_path.to_path_buf())
+            .build()
+            .await;
+
+        match tasks_result {
+            Ok(tasks) => {
+                // Extract the names of tasks that would be executed
+                let mut matched_names = Vec::new();
+                for &index in &tasks.roots {
+                    if let Some(task_state) = tasks.graph.node_weight(index) {
+                        let task_name = task_state.read().await.task.name.clone();
+                        matched_names.push(task_name);
+                    }
+                }
+
+                matched_names.sort();
+                Ok(matched_names)
+            }
+            Err(Error::TaskNotFound(_)) => {
+                // Only return empty vec for TaskNotFound (no matching tasks)
+                Ok(vec![])
+            }
+            Err(e) => {
+                // Propagate other errors (IoError, CacheError, InvalidTaskName, etc.)
+                Err(e)
+            }
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn prop_prefix_matching_correctness(
+            task_names in task_hierarchy(),
+            prefix in valid_segment()
+        ) {
+            tokio_test::block_on(async {
+                // Create database once for this test invocation
+                let temp_dir = TempDir::new().unwrap();
+                let db_path = temp_dir.path().join("tasks.db");
+
+                // Expected matches: all tasks that start with "prefix:"
+                let expected_matches: Vec<String> = task_names.iter()
+                    .filter(|name| name.starts_with(&format!("{}:", prefix)))
+                    .cloned()
+                    .collect();
+
+                // Skip test if no expected matches (nothing to test)
+                if expected_matches.is_empty() {
+                    return Ok(());
+                }
+
+                let actual_matches = get_matching_task_names(&task_names, &prefix, &db_path).await?;
+
+                // Sort both for comparison
+                let mut expected_sorted = expected_matches.clone();
+                expected_sorted.sort();
+
+                prop_assert_eq!(actual_matches, expected_sorted);
+
+                Ok(())
+            })?;
+        }
+
+        #[test]
+        fn prop_exact_task_matching(
+            task_names in task_hierarchy(),
+            task_index in 0..15usize
+        ) {
+            tokio_test::block_on(async {
+                // Create database once for this test invocation
+                let temp_dir = TempDir::new().unwrap();
+                let db_path = temp_dir.path().join("tasks.db");
+
+                // Skip if index is out of bounds
+                if task_index >= task_names.len() {
+                    return Ok(());
+                }
+
+                let exact_task = &task_names[task_index];
+                let matches = get_matching_task_names(&task_names, exact_task, &db_path).await?;
+
+                // Should match exactly one task
+                prop_assert_eq!(matches.len(), 1);
+                prop_assert_eq!(&matches[0], exact_task);
+
+                Ok(())
+            })?;
+        }
+
+        #[test]
+        fn prop_trailing_colon_equivalence(
+            task_names in task_hierarchy(),
+            prefix in valid_segment()
+        ) {
+            tokio_test::block_on(async {
+                // Create database once for this test invocation
+                let temp_dir = TempDir::new().unwrap();
+                let db_path = temp_dir.path().join("tasks.db");
+
+                // Skip if no tasks match this prefix
+                let has_matches = task_names.iter()
+                    .any(|name| name.starts_with(&format!("{}:", prefix)));
+                if !has_matches {
+                    return Ok(());
+                }
+
+                let matches_without_colon = get_matching_task_names(&task_names, &prefix, &db_path).await?;
+                let matches_with_colon = get_matching_task_names(&task_names, &format!("{}:", prefix), &db_path).await?;
+
+                prop_assert_eq!(matches_without_colon, matches_with_colon);
+
+                Ok(())
+            })?;
+        }
+
+        #[test]
+        fn prop_namespace_exclusion(
+            task_names in task_hierarchy(),
+            prefix in valid_segment()
+        ) {
+            tokio_test::block_on(async {
+                // Create database once for this test invocation
+                let temp_dir = TempDir::new().unwrap();
+                let db_path = temp_dir.path().join("tasks.db");
+
+                let matches = get_matching_task_names(&task_names, &prefix, &db_path).await?;
+
+                // All matched tasks should start with the prefix
+                for matched_task in &matches {
+                    prop_assert!(
+                        matched_task.starts_with(&format!("{}:", prefix)),
+                        "Task '{}' should start with '{}:'", matched_task, prefix
+                    );
+                }
+
+                // All non-matched tasks should NOT start with the prefix
+                for task in &task_names {
+                    if task.starts_with(&format!("{}:", prefix)) {
+                        prop_assert!(
+                            matches.contains(task),
+                            "Task '{}' starts with '{}:' but was not matched", task, prefix
+                        );
+                    }
+                }
+
+                Ok(())
+            })?;
+        }
+
+        #[test]
+        fn prop_hierarchical_inclusion(
+            task_names in task_hierarchy()
+        ) {
+            tokio_test::block_on(async {
+                // Create database once for this test invocation (reused across all iterations)
+                let temp_dir = TempDir::new().unwrap();
+                let db_path = temp_dir.path().join("tasks.db");
+
+                // For each task, test that shorter prefixes include longer ones
+                for task in &task_names {
+                    let segments: Vec<&str> = task.split(':').collect();
+
+                    // Test each level of the hierarchy
+                    for i in 1..segments.len() {
+                        let shorter_prefix = segments[0..i].join(":");
+                        let longer_prefix = segments[0..i+1].join(":");
+
+                        // Skip if the longer prefix doesn't match any tasks
+                        let has_longer_matches = task_names.iter()
+                            .any(|name| name.starts_with(&format!("{}:", longer_prefix)));
+                        if !has_longer_matches {
+                            continue;
+                        }
+
+                        let shorter_matches = get_matching_task_names(&task_names, &shorter_prefix, &db_path).await?;
+                        let longer_matches = get_matching_task_names(&task_names, &longer_prefix, &db_path).await?;
+
+                        // Every task matched by longer prefix should also be matched by shorter prefix
+                        for longer_match in &longer_matches {
+                            prop_assert!(
+                                shorter_matches.contains(longer_match),
+                                "Task '{}' matched by '{}' should also be matched by '{}'",
+                                longer_match, longer_prefix, shorter_prefix
+                            );
+                        }
+                    }
+                }
+
+                Ok(())
+            })?;
+        }
+    }
 }
