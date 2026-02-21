@@ -1,0 +1,10 @@
+---
+source: devenv-tui/tests/tui_tests.rs
+expression: output
+---
+⠋ test:parent
+  └ ⠋ test:child-a
+  └ ⠋ test:child-b
+  └ ⠋ test:child-c
+
+ 0 of 4 tas    ↑↓ nav

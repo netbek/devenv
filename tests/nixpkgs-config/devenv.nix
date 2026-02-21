@@ -6,11 +6,6 @@
   };
 
   enterTest = ''
-    if [ -z "$DEVENV_NIX" ]; then
-      echo "DEVENV_NIX is not set"
-      exit 1
-    fi
-
     if [[ "$ALLOW_UNFREE" != "true" ]]; then
       echo "ALLOW_UNFREE ($ALLOW_UNFREE) != true"
       exit 1

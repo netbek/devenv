@@ -12,8 +12,14 @@ rustPlatform.buildRustPackage {
   pname = "devenv-tasks";
   inherit src version cargoLock;
 
+  RUSTFLAGS = "--cfg tracing_unstable";
+
   cargoBuildFlags = [ "-p devenv-tasks" ];
   buildType = cargoProfile;
+
+  nativeBuildInputs = [
+    rustPlatform.bindgenHook
+  ];
 
   inherit doCheck;
 }

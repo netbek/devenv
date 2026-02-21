@@ -1,5 +1,8 @@
 use clap::{Parser, Subcommand};
-use devenv_tasks::{Config, RunMode, SudoContext, TaskConfig, Tasks, TasksUi, VerbosityLevel};
+use devenv_processes::get_process_runtime_dir;
+use devenv_tasks::{
+    Config, RunMode, SudoContext, TaskConfig, Tasks, TasksUi, VerbosityLevel, is_tty,
+};
 use std::{env, fmt::Display, fs, path::PathBuf, sync::Arc};
 use thiserror::Error;
 use tokio_shutdown::Shutdown;
@@ -27,6 +30,12 @@ enum Command {
             help = "Path to a JSON file containing task definitions"
         )]
         task_file: Option<PathBuf>,
+
+        #[clap(long, help = "Directory for task cache database")]
+        cache_dir: PathBuf,
+
+        #[clap(long, help = "Runtime directory for process state")]
+        runtime_dir: PathBuf,
     },
     Export {
         #[clap()]
@@ -109,16 +118,25 @@ async fn run_tasks(shutdown: Arc<Shutdown>) -> Result<()> {
     let args = Args::parse();
 
     // Determine verbosity level from DEVENV_CMDLINE
+    // TUI is on by default when there's a TTY, so we default to Quiet to avoid corrupting the TUI display.
+    // When there's no TTY (e.g., running under process-compose), we should show normal output since
+    // there's no TUI to corrupt and process-compose needs to capture our stdout/stderr for its logs.
+    let has_tty = is_tty();
     let mut verbosity = if let Ok(cmdline) = env::var("DEVENV_CMDLINE") {
         let cmdline = cmdline.to_lowercase();
         if cmdline.contains("--quiet") || cmdline.contains(" -q ") {
             VerbosityLevel::Quiet
         } else if cmdline.contains("--verbose") || cmdline.contains(" -v ") {
             VerbosityLevel::Verbose
-        } else {
+        } else if cmdline.contains("--no-tui") || !has_tty {
+            // TUI is disabled or there's no TTY, show normal output
             VerbosityLevel::Normal
+        } else {
+            // TUI is on by default when there's a TTY, suppress output
+            VerbosityLevel::Quiet
         }
     } else {
+        // No DEVENV_CMDLINE means we're likely running standalone, show output
         VerbosityLevel::Normal
     };
 
@@ -134,21 +152,52 @@ async fn run_tasks(shutdown: Arc<Shutdown>) -> Result<()> {
             roots,
             mode,
             task_file,
+            cache_dir,
+            runtime_dir,
         } => {
-            let tasks: Vec<TaskConfig> = fetch_tasks(&task_file)?;
+            let mut tasks: Vec<TaskConfig> = fetch_tasks(&task_file)?;
+
+            // If --show-output flag is present, enable output for all tasks
+            if let Ok(cmdline) = env::var("DEVENV_CMDLINE") {
+                let cmdline = cmdline.to_lowercase();
+                if cmdline.contains("--show-output") {
+                    for task in &mut tasks {
+                        task.show_output = true;
+                    }
+                }
+            }
+
+            let runtime_dir = get_process_runtime_dir(&runtime_dir).map_err(|e| {
+                TaskError::Other(format!("Failed to create runtime directory: {}", e))
+            })?;
 
             let config = Config {
                 tasks,
                 roots,
                 run_mode: mode,
+                runtime_dir,
+                cache_dir,
                 sudo_context: sudo_context.clone(),
+                env: std::env::vars().collect(),
             };
 
             let tasks = Tasks::builder(config, verbosity, Arc::clone(&shutdown))
                 .build()
                 .await?;
 
-            let (status, _) = TasksUi::new(tasks, verbosity).run().await?;
+            // Initialize activity channel for TasksUi
+            let (activity_rx, activity_handle) = devenv_activity::init();
+            activity_handle.install();
+
+            let tasks = Arc::new(tasks);
+            let tasks_clone = Arc::clone(&tasks);
+
+            // Spawn task runner - UI will detect completion via JoinHandle
+            let run_handle = tokio::spawn(async move { tasks_clone.run(false).await });
+
+            // Run UI - processes events and waits for run_handle
+            let ui = TasksUi::new(Arc::clone(&tasks), activity_rx, verbosity);
+            let (status, _) = ui.run(run_handle).await?;
 
             if shutdown.last_signal().is_some() {
                 shutdown.exit_process();

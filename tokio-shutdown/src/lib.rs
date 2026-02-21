@@ -1,23 +1,38 @@
 use nix::sys::signal::{
-    self as nix_signal, SaFlags, SigAction, SigHandler as NixSigHandler, SigSet, Signal,
+    self as nix_signal, SaFlags, SigAction, SigHandler as NixSigHandler, SigSet,
 };
 use nix::unistd;
+
+// Re-export Signal for consumers who need to set it manually (e.g., TUI mode)
+pub use nix::sys::signal::Signal;
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicI32, Ordering};
 use tokio::signal;
-use tokio::sync::Notify;
+use tokio::sync::oneshot;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 /// A graceful shutdown manager for tokio applications
-#[derive(Debug)]
 pub struct Shutdown {
     token: CancellationToken,
-    task_count: AtomicUsize,
     last_signal: AtomicI32,
-    shutdown_complete: Notify,
+    /// Optional receiver for cleanup completion signal
+    cleanup_complete: Mutex<Option<oneshot::Receiver<()>>>,
+    /// Hook called before force-exiting (e.g., to restore terminal state)
+    pre_exit_hook: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+}
+
+impl std::fmt::Debug for Shutdown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Shutdown")
+            .field("token", &self.token)
+            .field("last_signal", &self.last_signal)
+            .field("cleanup_complete", &"<Mutex>")
+            .finish()
+    }
 }
 
 impl Shutdown {
@@ -25,32 +40,24 @@ impl Shutdown {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             token: CancellationToken::new(),
-            task_count: AtomicUsize::new(0),
             last_signal: AtomicI32::new(0),
-            shutdown_complete: Notify::new(),
+            cleanup_complete: Mutex::new(None),
+            pre_exit_hook: Mutex::new(None),
         })
     }
 
-    fn register_task(&self) -> bool {
-        // Skip registering tasks if cancellation has been requested
-        if self.token.is_cancelled() {
-            return false;
-        }
-
-        self.task_count.fetch_add(1, Ordering::Relaxed);
-
-        true
+    /// Set a hook to be called before force-exiting the process.
+    ///
+    /// This is called when `exit_process()` is triggered (e.g., on second Ctrl+C).
+    /// Use this to restore terminal state or perform other critical cleanup.
+    pub fn set_pre_exit_hook<F: Fn() + Send + Sync + 'static>(&self, hook: F) {
+        *self.pre_exit_hook.lock().unwrap() = Some(Box::new(hook));
     }
 
-    fn unregister_task(&self) {
-        let remaining = self
-            .task_count
-            .fetch_sub(1, Ordering::AcqRel)
-            .saturating_sub(1);
-
-        if self.token.is_cancelled() && remaining == 0 {
-            self.shutdown_complete.notify_waiters();
-        }
+    /// Set the cleanup completion receiver.
+    /// When shutdown completes, `wait_for_shutdown_complete()` will await this receiver.
+    pub fn set_cleanup_receiver(&self, rx: oneshot::Receiver<()>) {
+        *self.cleanup_complete.lock().unwrap() = Some(rx);
     }
 
     /// Run a task and trigger shutdown when it completes (Send futures only)
@@ -66,7 +73,7 @@ impl Shutdown {
         let shutdown = Arc::clone(self);
 
         tokio::spawn(async move {
-            if !shutdown.register_task() {
+            if shutdown.is_cancelled() {
                 return None;
             }
 
@@ -75,8 +82,6 @@ impl Shutdown {
                 res = &mut fut => (Some(res), true),
                 _ = shutdown.token.cancelled() => (None, false),
             };
-
-            shutdown.unregister_task();
 
             if should_trigger_shutdown {
                 shutdown.shutdown();
@@ -103,11 +108,11 @@ impl Shutdown {
         let child_token = self.token.child_token();
 
         tokio::spawn(async move {
-            if !shutdown.register_task() {
+            if shutdown.is_cancelled() {
                 return None;
             }
 
-            let result = tokio::select! {
+            tokio::select! {
                 result = task() => Some(result),
                 _ = child_token.cancelled() => {
                     if let Some(cleanup) = cleanup {
@@ -115,22 +120,13 @@ impl Shutdown {
                     }
                     None
                 }
-            };
-
-            shutdown.unregister_task();
-
-            result
+            }
         })
     }
 
     /// Trigger shutdown
     pub fn shutdown(&self) {
         self.token.cancel();
-
-        // If there are no more tasks, notify that shutdown is complete
-        if self.task_count.load(Ordering::Acquire) == 0 {
-            self.shutdown_complete.notify_waiters();
-        }
     }
 
     /// Install signal handlers for graceful shutdown
@@ -150,18 +146,25 @@ impl Shutdown {
 
                 tokio::select! {
                     _ = sigint.recv() => {
-                        info!("Received SIGINT (Ctrl+C), shutting down gracefully...");
                         last_signal = Signal::SIGINT;
                     }
                     _ = sigterm.recv() => {
-                        info!("Received SIGTERM, shutting down gracefully...");
                         last_signal = Signal::SIGTERM;
                     }
                     _ = sighup.recv() => {
-                        info!("Received SIGHUP, shutting down gracefully...");
                         last_signal = Signal::SIGHUP;
                     }
                 }
+
+                // If a signal was already received (either from a previous real
+                // signal or set by the TUI keyboard handler), this is a repeated
+                // interrupt — force-exit immediately.
+                if shutdown.last_signal.load(Ordering::Relaxed) != 0 {
+                    info!("Received second signal, forcing exit...");
+                    shutdown.exit_process();
+                }
+
+                info!("Received {:?}, shutting down gracefully...", last_signal);
 
                 // Store the last signal received
                 shutdown
@@ -179,9 +182,13 @@ impl Shutdown {
         self.token.cancelled().await;
     }
 
-    /// Wait for shutdown to complete (all tasks finished)
+    /// Wait for shutdown to complete (cleanup task finished)
     pub async fn wait_for_shutdown_complete(&self) {
-        self.shutdown_complete.notified().await;
+        let rx = self.cleanup_complete.lock().unwrap().take();
+        if let Some(rx) = rx {
+            // Ignore error (sender dropped means cleanup is done)
+            let _ = rx.await;
+        }
     }
 
     /// Check if shutdown has been triggered
@@ -211,9 +218,24 @@ impl Shutdown {
         }
     }
 
+    /// Set the last signal manually.
+    ///
+    /// Used in TUI mode where Ctrl+C is received as a keyboard event rather than
+    /// a signal. Setting this ensures the Nix backend knows to interrupt operations.
+    pub fn set_last_signal(&self, signal: Signal) {
+        self.last_signal.store(signal as i32, Ordering::Relaxed);
+    }
+
     /// Restore the default handler for the last received signal and re-raise the signal
     /// to terminate with the correct exit code.
     pub fn exit_process(&self) -> ! {
+        // Run pre-exit hook (e.g., restore terminal state) before killing the process
+        if let Ok(guard) = self.pre_exit_hook.lock() {
+            if let Some(hook) = guard.as_ref() {
+                hook();
+            }
+        }
+
         let signal = self.last_signal().unwrap_or(Signal::SIGTERM);
         let action = SigAction::new(NixSigHandler::SigDfl, SaFlags::empty(), SigSet::empty());
         unsafe {
@@ -258,15 +280,10 @@ where
         let shutdown = Arc::clone(&self.shutdown);
 
         self.join_set.spawn(async move {
-            if !shutdown.register_task() {
+            if shutdown.is_cancelled() {
                 return None;
             }
-
-            let result = task().await;
-
-            shutdown.unregister_task();
-
-            Some(result)
+            Some(task().await)
         });
 
         self
@@ -285,11 +302,11 @@ where
         let child_token = self.shutdown.token.child_token();
 
         self.join_set.spawn(async move {
-            if !shutdown.register_task() {
+            if shutdown.is_cancelled() {
                 return None;
             }
 
-            let result = tokio::select! {
+            tokio::select! {
                 result = task() => Some(result),
                 _ = child_token.cancelled() => {
                     if let Some(cleanup) = cleanup {
@@ -297,11 +314,7 @@ where
                     }
                     None
                 }
-            };
-
-            shutdown.unregister_task();
-
-            result
+            }
         });
 
         self
@@ -402,7 +415,8 @@ mod tests {
         assert!(cancelled.load(std::sync::atomic::Ordering::Relaxed));
     }
 
-    #[tokio::test]
+    // Use start_paused to make time deterministic and avoid race conditions
+    #[tokio::test(start_paused = true)]
     async fn test_multiple_tasks() {
         let shutdown = Shutdown::new();
 
@@ -450,30 +464,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_wait_for_shutdown() {
+    async fn test_wait_for_shutdown_complete() {
         let shutdown = Shutdown::new();
 
-        // Start a long running task
-        let handle = shutdown
-            .shutdown_when_done(async {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-                "done"
-            })
-            .await;
+        // Set up cleanup channel
+        let (cleanup_tx, cleanup_rx) = tokio::sync::oneshot::channel::<()>();
+        shutdown.set_cleanup_receiver(cleanup_rx);
 
-        // Start shutdown in background
-        tokio::spawn({
-            let shutdown = Arc::clone(&shutdown);
-            async move {
-                tokio::time::sleep(Duration::from_millis(25)).await;
-                shutdown.shutdown();
-            }
+        // Spawn cleanup task that sends on completion
+        let shutdown_for_task = Arc::clone(&shutdown);
+        tokio::spawn(async move {
+            shutdown_for_task.cancellation_token().cancelled().await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let _ = cleanup_tx.send(());
         });
 
-        // This should complete when shutdown is done
+        // Trigger shutdown
+        shutdown.shutdown();
+
+        // This should complete when cleanup sends
         shutdown.wait_for_shutdown_complete().await;
-        let result = handle.await.unwrap();
-        assert_eq!(result, None); // Task was cancelled
+        assert!(shutdown.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_shutdown_complete_no_receiver() {
+        let shutdown = Shutdown::new();
+
+        // No cleanup receiver set - should return immediately
+        shutdown.shutdown();
+        shutdown.wait_for_shutdown_complete().await;
         assert!(shutdown.is_cancelled());
     }
 

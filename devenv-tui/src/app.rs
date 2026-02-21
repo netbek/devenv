@@ -1,0 +1,641 @@
+use crate::{
+    expanded_view::ExpandedLogView,
+    model::{ActivityModel, RenderContext, UiState, ViewMode},
+    view::view,
+};
+use crossterm::{
+    cursor, execute,
+    style::{Color, ResetColor, SetForegroundColor},
+    terminal,
+};
+use devenv_activity::{ActivityEvent, ActivityLevel};
+use devenv_processes::ProcessCommand;
+use iocraft::prelude::*;
+use std::io::{self, Write};
+use std::sync::{Arc, OnceLock, RwLock};
+use tokio::sync::{Notify, mpsc, watch};
+use tokio_shutdown::{Shutdown, Signal};
+use tracing::debug;
+
+/// Original terminal settings saved before TUI enters raw mode.
+static ORIGINAL_TERMIOS: OnceLock<libc::termios> = OnceLock::new();
+
+/// Configuration for the TUI application.
+///
+/// Note: The TUI always renders to stderr to keep stdout available for command output
+/// (e.g., `devenv print-dev-env` pipes stdout to shell eval).
+#[derive(Debug, Clone)]
+pub struct TuiConfig {
+    /// Maximum events to batch before processing
+    pub event_batch_size: usize,
+    /// Maximum log messages to keep in memory
+    pub max_log_messages: usize,
+    /// Maximum log lines per build activity
+    pub max_log_lines_per_build: usize,
+    /// Number of log lines to show in collapsed view
+    pub log_viewport_collapsed: usize,
+    /// Maximum frames per second for rendering
+    pub max_fps: u64,
+    /// Minimum activity level to display (activities below this level are filtered out)
+    pub filter_level: ActivityLevel,
+}
+
+impl Default for TuiConfig {
+    fn default() -> Self {
+        Self {
+            event_batch_size: 64,
+            max_log_messages: 1000,
+            max_log_lines_per_build: 1000,
+            log_viewport_collapsed: 10,
+            max_fps: 30,
+            filter_level: ActivityLevel::Info,
+        }
+    }
+}
+
+/// Builder for creating and running the TUI application.
+pub struct TuiApp {
+    config: TuiConfig,
+    activity_rx: mpsc::UnboundedReceiver<ActivityEvent>,
+    shutdown: Arc<Shutdown>,
+    command_tx: Option<mpsc::Sender<ProcessCommand>>,
+    shutdown_on_backend_done: bool,
+}
+
+impl TuiApp {
+    /// Create a new TUI application with required dependencies.
+    pub fn new(
+        activity_rx: mpsc::UnboundedReceiver<ActivityEvent>,
+        shutdown: Arc<Shutdown>,
+    ) -> Self {
+        Self {
+            config: TuiConfig::default(),
+            activity_rx,
+            shutdown,
+            command_tx: None,
+            shutdown_on_backend_done: true,
+        }
+    }
+
+    /// Set the command sender for process control commands.
+    pub fn with_command_sender(mut self, tx: mpsc::Sender<ProcessCommand>) -> Self {
+        self.command_tx = Some(tx);
+        self
+    }
+
+    /// Set the event batch size for processing activity events.
+    pub fn batch_size(mut self, size: usize) -> Self {
+        self.config.event_batch_size = size;
+        self
+    }
+
+    /// Set the maximum number of log messages to keep in memory.
+    pub fn max_messages(mut self, n: usize) -> Self {
+        self.config.max_log_messages = n;
+        self
+    }
+
+    /// Set the maximum log lines per build activity.
+    pub fn max_build_logs(mut self, n: usize) -> Self {
+        self.config.max_log_lines_per_build = n;
+        self
+    }
+
+    /// Set the number of log lines to show in collapsed view.
+    pub fn collapsed_lines(mut self, n: usize) -> Self {
+        self.config.log_viewport_collapsed = n;
+        self
+    }
+
+    /// Set the minimum activity level to display.
+    /// Activities below this level will be filtered out.
+    pub fn filter_level(mut self, level: ActivityLevel) -> Self {
+        self.config.filter_level = level;
+        self
+    }
+
+    /// Control whether backend completion should trigger global shutdown.
+    /// Disable for shell reload handoff where the backend must keep running.
+    pub fn shutdown_on_backend_done(mut self, enabled: bool) -> Self {
+        self.shutdown_on_backend_done = enabled;
+        self
+    }
+
+    /// Run the TUI application until the backend completes.
+    ///
+    /// The `backend_done` receiver signals when the backend has completed its
+    /// initial phase (or fully completed). The TUI will drain any remaining
+    /// events and then exit.
+    /// Run the TUI and return the final render height (for cursor positioning after handoff).
+    pub async fn run(
+        self,
+        backend_done: tokio::sync::oneshot::Receiver<()>,
+    ) -> std::io::Result<u16> {
+        let config = Arc::new(self.config);
+        let activity_model = Arc::new(RwLock::new(ActivityModel::with_config(config.clone())));
+        let notify = Arc::new(Notify::new());
+        let shutdown = self.shutdown;
+        let command_tx = self.command_tx;
+        let shutdown_on_backend_done = self.shutdown_on_backend_done;
+        let (exit_tx, mut exit_rx) = watch::channel(false);
+
+        // Spawn event processor with batching for performance
+        // This only writes to ActivityModel, never touches UiState
+        // When backend_done fires, it drains remaining events and signals shutdown
+        let event_processor_handle = tokio::spawn({
+            let activity_model = activity_model.clone();
+            let notify = notify.clone();
+            let shutdown = shutdown.clone();
+            let event_batch_size = config.event_batch_size;
+            let mut activity_rx = self.activity_rx;
+            let mut backend_done = backend_done;
+            let exit_tx = exit_tx.clone();
+            async move {
+                let mut batch = Vec::with_capacity(event_batch_size);
+
+                loop {
+                    tokio::select! {
+                        event = activity_rx.recv() => {
+                            let Some(event) = event else {
+                                // Channel closed unexpectedly
+                                let _ = exit_tx.send(true);
+                                if shutdown_on_backend_done {
+                                    shutdown.shutdown();
+                                }
+                                break;
+                            };
+
+                            batch.push(event);
+                            while let Ok(event) = activity_rx.try_recv() {
+                                batch.push(event);
+                                if batch.len() >= event_batch_size {
+                                    break;
+                                }
+                            }
+
+                            if let Ok(mut m) = activity_model.write() {
+                                for event in batch.drain(..) {
+                                    m.apply_activity_event(event);
+                                }
+                            }
+
+                            notify.notify_waiters();
+                        }
+
+                        _ = &mut backend_done => {
+                            // Backend is done - drain any remaining events
+                            while let Ok(event) = activity_rx.try_recv() {
+                                batch.push(event);
+                            }
+
+                            if !batch.is_empty() {
+                                if let Ok(mut m) = activity_model.write() {
+                                    for event in batch.drain(..) {
+                                        m.apply_activity_event(event);
+                                    }
+                                }
+                                notify.notify_waiters();
+                            }
+
+                            let _ = exit_tx.send(true);
+                            if shutdown_on_backend_done {
+                                shutdown.shutdown();
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        // Track height to clear when returning from expanded view
+        let mut pre_expand_height: u16 = 0;
+
+        // UiState is separate from ActivityModel to avoid lock contention.
+        // The event processor only writes to ActivityModel, never UiState.
+        // UiState is only modified by the UI thread.
+        let ui_state = Arc::new(RwLock::new(UiState::new()));
+
+        // Main loop - runs until shutdown (either Ctrl+C or event processor signals completion)
+        loop {
+            tokio::select! {
+                _ = shutdown.wait_for_shutdown() => {
+                    break;
+                }
+
+                changed = exit_rx.changed() => {
+                    if changed.is_err() || *exit_rx.borrow() {
+                        break;
+                    }
+                }
+
+                _ = run_view(
+                    activity_model.clone(),
+                    ui_state.clone(),
+                    notify.clone(),
+                    shutdown.clone(),
+                    config.clone(),
+                    command_tx.clone(),
+                    &mut pre_expand_height,
+                ) => { }
+            }
+        }
+
+        // Wait for event processor to finish draining events before final render.
+        // This ensures all activity completion events are processed and visible.
+        let _ = event_processor_handle.await;
+
+        // Final render pass to ensure all drained events are displayed
+        // This replaces the old is_done() check that triggered shutdown AFTER rendering
+        //
+        // On interrupt (Ctrl+C): clear the output so the user sees a clean terminal
+        // On normal completion: clear previous render, then render final state
+        let mut final_render_height: u16 = 0;
+        {
+            let ui = ui_state.read().unwrap();
+            if let Ok(model_guard) = activity_model.read() {
+                // Clear the previous inline render output (which had the summary line)
+                let lines_to_clear = ui.last_render_height;
+
+                if lines_to_clear > 0 {
+                    let mut stderr = io::stderr();
+                    let _ = execute!(
+                        stderr,
+                        cursor::MoveToPreviousLine(lines_to_clear),
+                        terminal::Clear(terminal::ClearType::FromCursorDown)
+                    );
+                }
+
+                // On interrupt, don't render final state (user wants to exit quickly)
+                // On normal completion, render the final state with all events processed
+                if shutdown.last_signal().is_none() {
+                    // Collect standalone error messages (no parent) from message_log
+                    let standalone_errors: Vec<_> = model_guard
+                        .get_error_messages()
+                        .into_iter()
+                        .map(|m| (m.text.clone(), m.details.clone()))
+                        .collect();
+
+                    // Collect nested error messages (with parent) from activities
+                    let activity_errors: Vec<_> = model_guard
+                        .get_activity_error_messages()
+                        .into_iter()
+                        .map(|(name, details)| (name.to_string(), details.map(|s| s.to_string())))
+                        .collect();
+
+                    // Collect stderr from failed builds
+                    let failed_build_errors: Vec<_> = model_guard
+                        .get_failed_build_errors()
+                        .into_iter()
+                        .map(|(name, lines)| (name.to_string(), lines.to_vec()))
+                        .collect();
+
+                    let (terminal_width, _) = crossterm::terminal::size().unwrap_or((80, 24));
+
+                    let mut element = element! {
+                        View(width: terminal_width) {
+                            #(vec![view(&model_guard, &ui, RenderContext::Final).into()])
+                        }
+                    };
+                    let canvas = element.render(Some(terminal_width as usize));
+                    final_render_height = canvas.height() as u16;
+                    let _ = canvas.write_ansi(io::stderr());
+
+                    // Print full error messages in red (not truncated by TUI width)
+                    let has_errors = !standalone_errors.is_empty()
+                        || !activity_errors.is_empty()
+                        || !failed_build_errors.is_empty();
+                    if has_errors {
+                        let mut stderr = io::stderr();
+                        eprintln!();
+                        final_render_height += 1; // for the empty line
+
+                        // Print standalone error messages (no parent activity)
+                        for (text, details) in standalone_errors {
+                            let _ = execute!(stderr, SetForegroundColor(Color::AnsiValue(160)));
+                            eprintln!("{}", text);
+                            final_render_height += 1;
+                            if let Some(details) = details {
+                                final_render_height += details.lines().count() as u16;
+                                eprintln!("{}", details);
+                            }
+                            let _ = execute!(stderr, ResetColor);
+                        }
+
+                        // Print error messages from Activity::Message variants
+                        for (text, details) in activity_errors {
+                            let _ = execute!(stderr, SetForegroundColor(Color::AnsiValue(160)));
+                            eprintln!("{}", text);
+                            final_render_height += 1;
+                            if let Some(details) = details {
+                                final_render_height += details.lines().count() as u16;
+                                eprintln!("{}", details);
+                            }
+                            let _ = execute!(stderr, ResetColor);
+                        }
+
+                        // Print build stderr (from failed or incomplete builds)
+                        for (name, lines) in failed_build_errors {
+                            let _ = execute!(stderr, SetForegroundColor(Color::AnsiValue(160)));
+                            eprintln!("Build error: {}", name);
+                            final_render_height += 1;
+                            for line in lines {
+                                eprintln!("  {}", line);
+                                final_render_height += 1;
+                            }
+                            let _ = execute!(stderr, ResetColor);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(final_render_height)
+    }
+}
+
+/// Save the current terminal state before starting the TUI.
+///
+/// Must be called before iocraft's render_loop enters raw mode, so we have
+/// the original (cooked) terminal settings to restore later. This is more
+/// robust than relying on crossterm's `disable_raw_mode()`, which only works
+/// if crossterm's own `enable_raw_mode()` was used to enter raw mode.
+pub fn save_terminal_state() {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = io::stdin().as_raw_fd();
+        if unsafe { libc::isatty(fd) } == 0 {
+            return;
+        }
+        let mut termios: libc::termios = unsafe { std::mem::zeroed() };
+        if unsafe { libc::tcgetattr(fd, &mut termios) } == 0 {
+            ORIGINAL_TERMIOS.get_or_init(|| termios);
+        }
+    }
+}
+
+/// Restore terminal to normal state.
+/// Call this after the TUI has exited to ensure the terminal is usable.
+/// Safe to call multiple times and from signal/panic contexts.
+pub fn restore_terminal() {
+    let mut stderr = io::stderr();
+
+    // Try crossterm's disable_raw_mode first as a best-effort fallback.
+    // This must come BEFORE tcsetattr so our saved original state has
+    // the final word (crossterm may not have the correct saved state if
+    // iocraft managed raw mode independently).
+    let _ = terminal::disable_raw_mode();
+
+    // Restore original terminal settings saved before TUI started.
+    // This is the authoritative restoration — it always restores the
+    // exact terminal state from before the TUI was initialized.
+    #[cfg(unix)]
+    if let Some(original) = ORIGINAL_TERMIOS.get() {
+        use std::os::unix::io::AsRawFd;
+        let fd = io::stdin().as_raw_fd();
+        unsafe { libc::tcsetattr(fd, libc::TCSANOW, original) };
+    }
+
+    // Leave alternate screen (expanded log view uses fullscreen mode)
+    let _ = execute!(stderr, terminal::LeaveAlternateScreen);
+
+    // Show cursor (TUI may have hidden it)
+    let _ = execute!(stderr, cursor::Show);
+
+    // Ensure output is flushed
+    let _ = stderr.flush();
+}
+
+/// Main TUI component (inline mode)
+#[component]
+fn MainView(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let config = hooks.use_context::<Arc<TuiConfig>>();
+    let activity_model = hooks.use_context::<Arc<RwLock<ActivityModel>>>();
+    let ui_state = hooks.use_context::<Arc<RwLock<UiState>>>();
+    let notify = hooks.use_context::<Arc<Notify>>();
+    let (terminal_width, terminal_height) = hooks.use_terminal_size();
+    let mut should_exit = hooks.use_state(|| false);
+    let shutdown = hooks.use_context::<Arc<Shutdown>>();
+    let mut system = hooks.use_context_mut::<SystemContext>();
+
+    // Redraw when notified of activity model changes (throttled)
+    let redraw = hooks.use_state(|| 0u64);
+    hooks.use_future({
+        let notify = notify.clone();
+        let max_fps = config.max_fps;
+        async move {
+            crate::throttled_notify_loop(notify, redraw, max_fps).await;
+        }
+    });
+
+    // Track terminal size changes (update UiState, no activity model lock needed)
+    let mut prev_size = hooks.use_state(crate::TerminalSize::default);
+    let current_size = crate::TerminalSize {
+        width: terminal_width,
+        height: terminal_height,
+    };
+    if current_size != prev_size.get() {
+        prev_size.set(current_size);
+        if let Ok(mut ui) = ui_state.write() {
+            ui.set_terminal_size(current_size.width, current_size.height);
+        }
+    }
+
+    // Get optional command sender for process control
+    let command_tx = hooks.use_context::<Option<mpsc::Sender<ProcessCommand>>>();
+
+    // Handle keyboard events - only UI state updates, no activity model writes
+    hooks.use_terminal_events({
+        let activity_model = activity_model.clone();
+        let ui_state = ui_state.clone();
+        let shutdown = shutdown.clone();
+        let command_tx = command_tx.clone();
+
+        move |event| {
+            if let TerminalEvent::Key(key_event) = event
+                && key_event.kind != KeyEventKind::Release
+            {
+                debug!("Key event: {:?}", key_event);
+                match key_event.code {
+                    KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                        // Set signal so Nix backend knows to interrupt operations
+                        shutdown.set_last_signal(Signal::SIGINT);
+                        shutdown.shutdown();
+                    }
+                    KeyCode::Char('r') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                        // Restart selected process
+                        if let Some(ref tx) = command_tx.as_ref() {
+                            if let Ok(ui) = ui_state.read()
+                                && let Some(activity_id) = ui.selected_activity
+                            {
+                                // Get the process name from the activity
+                                if let Ok(model) = activity_model.read() {
+                                    if let Some(activity) = model.get_activity(activity_id) {
+                                        if matches!(
+                                            activity.variant,
+                                            crate::model::ActivityVariant::Process(_)
+                                        ) {
+                                            let _ = tx.try_send(ProcessCommand::Restart(
+                                                activity.name.clone(),
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Char('e') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if let Ok(mut ui) = ui_state.write()
+                            && let Some(activity_id) = ui.selected_activity
+                        {
+                            ui.view_mode = ViewMode::ExpandedLogs { activity_id };
+                            should_exit.set(true);
+                        }
+                    }
+                    KeyCode::Down => {
+                        // Get selectable IDs from activity model (read-only)
+                        if let Ok(model) = activity_model.read() {
+                            let selectable = model.get_selectable_activity_ids();
+                            if let Ok(mut ui) = ui_state.write() {
+                                ui.select_next_activity(&selectable);
+                            }
+                        }
+                    }
+                    KeyCode::Up => {
+                        // Get selectable IDs from activity model (read-only)
+                        if let Ok(model) = activity_model.read() {
+                            let selectable = model.get_selectable_activity_ids();
+                            if let Ok(mut ui) = ui_state.write() {
+                                ui.select_previous_activity(&selectable);
+                            }
+                        }
+                    }
+                    KeyCode::Esc => {
+                        if let Ok(mut ui) = ui_state.write() {
+                            ui.selected_activity = None;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+
+    // Exit for explicit view mode switch (user pressed 'e' to expand)
+    // Note: We do NOT exit on shutdown.is_cancelled() - we keep running until
+    // the backend is fully done so all events are processed and displayed.
+    if should_exit.get() {
+        system.exit();
+    }
+
+    // Render the view - read activity model briefly, UI state separately
+    let ui = ui_state.read().unwrap();
+    let (rendered, last_render_height) = if let Ok(model_guard) = activity_model.read() {
+        let mut measure = element! {
+            View(width: terminal_width) {
+                #(vec![view(&model_guard, &ui, RenderContext::Normal).into()])
+            }
+        };
+        let height = measure.render(Some(terminal_width as usize)).height() as u16;
+        let rendered = element! {
+            View(width: terminal_width) {
+                #(vec![view(&model_guard, &ui, RenderContext::Normal).into()])
+            }
+        };
+        (rendered, height)
+    } else {
+        (element!(View(width: terminal_width)), 0)
+    };
+    drop(ui);
+    if let Ok(mut ui) = ui_state.write() {
+        ui.last_render_height = last_render_height;
+    }
+
+    rendered
+}
+
+async fn run_view(
+    activity_model: Arc<RwLock<ActivityModel>>,
+    ui_state: Arc<RwLock<UiState>>,
+    notify: Arc<Notify>,
+    shutdown: Arc<Shutdown>,
+    config: Arc<TuiConfig>,
+    command_tx: Option<mpsc::Sender<ProcessCommand>>,
+    pre_expand_height: &mut u16,
+) -> std::io::Result<()> {
+    // Copy view_mode in a block to ensure the guard is dropped before any await
+    let view_mode = {
+        let guard = ui_state.read().unwrap();
+        guard.view_mode
+    };
+
+    match view_mode {
+        ViewMode::Main => {
+            if *pre_expand_height > 0 {
+                let mut stderr = io::stderr();
+                let _ = execute!(
+                    stderr,
+                    cursor::MoveToPreviousLine(*pre_expand_height),
+                    terminal::Clear(terminal::ClearType::FromCursorDown)
+                );
+                *pre_expand_height = 0;
+            }
+
+            let mut element = element! {
+                ContextProvider(value: Context::owned(config.clone())) {
+                    ContextProvider(value: Context::owned(shutdown.clone())) {
+                        ContextProvider(value: Context::owned(notify.clone())) {
+                            ContextProvider(value: Context::owned(activity_model.clone())) {
+                                ContextProvider(value: Context::owned(ui_state.clone())) {
+                                    ContextProvider(value: Context::owned(command_tx.clone())) {
+                                        MainView
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+
+            element
+                .render_loop()
+                .output(Output::Stderr)
+                .ignore_ctrl_c()
+                .await
+        }
+        ViewMode::ExpandedLogs { activity_id } => {
+            // Calculate height before switching to expanded view
+            // Use a block to ensure guards are dropped before await
+            *pre_expand_height = {
+                let ui = ui_state.read().unwrap();
+                let model = activity_model.read().unwrap();
+                let (terminal_width, _) = crossterm::terminal::size().unwrap_or((80, 24));
+                let mut normal_view = element! {
+                    View(width: terminal_width) {
+                        #(vec![view(&model, &ui, RenderContext::Normal).into()])
+                    }
+                };
+                normal_view.render(Some(terminal_width as usize)).height() as u16
+            };
+
+            let mut element = element! {
+                ContextProvider(value: Context::owned(config.clone())) {
+                    ContextProvider(value: Context::owned(shutdown.clone())) {
+                        ContextProvider(value: Context::owned(notify.clone())) {
+                            ContextProvider(value: Context::owned(activity_model.clone())) {
+                                ContextProvider(value: Context::owned(ui_state.clone())) {
+                                    ContextProvider(value: Context::owned(activity_id)) {
+                                        ExpandedLogView
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+
+            element.fullscreen().ignore_ctrl_c().await
+        }
+    }
+}

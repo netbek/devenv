@@ -1,0 +1,17 @@
+[package]
+name = "devenv-event-sources"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reusable event sources for devenv (file watcher, TCP probe, notify socket)"
+
+[dependencies]
+async-priority-channel.workspace = true
+miette.workspace = true
+tokio = { workspace = true, features = ["net"] }
+tracing.workspace = true
+watchexec.workspace = true
+watchexec-filterer-globset.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

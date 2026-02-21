@@ -8,7 +8,7 @@
 # bundle
 {
   languages.ruby.enable = true;
-  languages.ruby.version = "3.2.2";
+  languages.ruby.version = "3.3";
 
   packages = [
     pkgs.openssl
@@ -21,7 +21,7 @@
   services.postgres.enable = true;
 
   processes.rails = {
-    exec = "cd blog && rails server";
+    exec = "cd blog && exec rails server";
     process-compose.depends_on.postgres.condition = "process_healthy";
   };
 

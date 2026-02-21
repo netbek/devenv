@@ -15,6 +15,7 @@ let
     name = "devenv-profile";
     paths = lib.flatten (builtins.map drvOrPackageToPaths config.packages);
     ignoreCollisions = true;
+    ignoreSingleFileOutputs = true;
   };
 
   failedAssertions = builtins.map (x: x.message) (builtins.filter (x: !x.assertion) config.assertions);
@@ -76,6 +77,18 @@ in
       type = types.listOf types.package;
       description = "A list of packages to expose inside the developer environment. Search available packages using ``devenv search NAME``.";
       default = [ ];
+    };
+
+    inputsFrom = lib.mkOption {
+      type = types.listOf types.package;
+      description = "A list of derivations whose build inputs will be merged into the shell environment.";
+      default = [ ];
+      example = lib.literalExpression ''
+        [
+          pkgs.hello
+          (pkgs.python3.withPackages (ps: [ ps.numpy ps.pandas ]))
+        ]
+      '';
     };
 
     stdenv = lib.mkOption {
@@ -229,19 +242,24 @@ in
             hashedRoot = builtins.hashString "sha256" config.devenv.state;
             # same length as git's abbreviated commit hashes
             shortHash = builtins.substring 0 7 hashedRoot;
+            # XDG_RUNTIME_DIR is the correct location for runtime files like sockets
+            # per the XDG Base Directory Specification
+            xdg = builtins.getEnv "XDG_RUNTIME_DIR";
+            base = if xdg != "" then xdg else config.devenv.tmpdir;
           in
-          "${config.devenv.tmpdir}/devenv-${shortHash}";
+          "${base}/devenv-${shortHash}";
       };
 
       tmpdir = lib.mkOption {
         type = types.str;
         internal = true;
+        # Used for TMPDIR override - should NOT use XDG_RUNTIME_DIR as that's
+        # a small tmpfs meant for runtime files (sockets), not build artifacts
         default =
           let
-            xdg = builtins.getEnv "XDG_RUNTIME_DIR";
             tmp = builtins.getEnv "TMPDIR";
           in
-          if xdg != "" then xdg else if tmp != "" then tmp else "/tmp";
+          if tmp != "" then tmp else "/tmp";
       };
 
       profile = lib.mkOption {
@@ -263,10 +281,11 @@ in
     ./containers.nix
     ./debug.nix
     ./lib.nix
-    ./configurations.nix
+    ./machines.nix
     ./tests.nix
     ./cachix.nix
     ./tasks.nix
+    ./changelogs.nix
     ./flake-compat.nix
   ]
   ++ (listEntries ./languages)
@@ -286,9 +305,9 @@ in
         '';
       }
       {
-        assertion = config.devenv.flakesIntegration || config.overlays == [ ] || lib.versionAtLeast config.devenv.cliVersion "1.4.2";
+        assertion = config.devenv.flakesIntegration || config.overlays == [ ] || (config.devenv.cli.version != null && lib.versionAtLeast config.devenv.cli.version "1.4.2");
         message = ''
-          Using overlays requires devenv 1.4.2 or higher, while your current version is ${config.devenv.cliVersion}.
+          Using overlays requires devenv 1.4.2 or higher, while your current version is ${toString config.devenv.cli.version}.
         '';
       }
     ];
@@ -359,8 +378,7 @@ in
       in
       performAssertions (
         (pkgs.mkShell.override { stdenv = config.stdenv; }) ({
-          inherit (config) name;
-          hardeningDisable = config.hardeningDisable;
+          inherit (config) hardeningDisable inputsFrom name;
           inherit buildInputs nativeBuildInputs;
           shellHook = ''
             ${lib.optionalString config.devenv.debug "set -x"}

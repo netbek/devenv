@@ -13,14 +13,14 @@
 === "macOS"
 
     ```
-    curl -L https://github.com/NixOS/experimental-nix-installer/releases/download/0.27.0/nix-installer.sh | sh -s -- install
+    curl -sSfL https://artifacts.nixos.org/nix-installer | sh -s -- install
     ```
 
-    !!! note "Experimental installer"
-        We recommend using the above experimental installer.
+    !!! note "Nix installer"
+        We recommend using the above installer.
         It can handle OS upgrades and has better support for Apple silicon.
 
-        If you'd like to stick with the official release installer, use:
+        If you'd like to stick with the classic installer, use:
         ```
         sh <(curl -L https://nixos.org/nix/install)
         ```
@@ -123,7 +123,7 @@ $ devenv init
 
 ## Learn more
 
-- About ``.envrc`` in [Automatic shell activation](automatic-shell-activation.md).
+- About ``.envrc`` in [direnv integration](integrations/direnv.md).
 - About ``devenv.yaml`` in [Inputs](inputs.md) and [Composing using imports](composing-using-imports.md).
 - About ``devenv.nix`` in the **Writing devenv.nix** section, starting with [the basics](basics.md).
 
@@ -160,3 +160,13 @@ devenv update
 ```
 
 Learn more about [Inputs](inputs.md).
+
+## Show your support
+
+Add a badge to your project's README to show it's built with devenv:
+
+[![Built with devenv](assets/devenv-badge.svg)](https://devenv.sh)
+
+```markdown
+[![Built with devenv](https://devenv.sh/assets/devenv-badge.svg)](https://devenv.sh)
+```

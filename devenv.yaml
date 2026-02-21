@@ -3,18 +3,27 @@ inputs:
   nixpkgs:
     url: github:cachix/devenv-nixpkgs/rolling
 
+  # Use the local development modules
+  devenv:
+    url: path:.?dir=src/modules
+
+  nix:
+    url: github:cachix/nix/devenv-2.32
+
+  git-hooks:
+    url: github:cachix/git-hooks.nix
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
+
+  pre-commit-hooks:
+    follows: git-hooks
+
   rust-overlay:
     url: github:oxalica/rust-overlay
     inputs:
       nixpkgs:
         follows: nixpkgs
-
-  nix:
-    url: github:cachix/nix/devenv-2.30.5
-
-  # Use the local development modules
-  devenv:
-    url: path:.?dir=src/modules
 
   devenv-claude-agents:
     url: github:cachix/devenv-claude-agents
@@ -24,3 +33,4 @@ inputs:
 imports:
   - devenv-claude-agents
   - ./docs
+  - ./devenv-nix-backend

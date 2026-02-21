@@ -1,4 +1,5 @@
 nav:
+  - direnv: direnv.md
   - .env: dotenv.md
   - secretspec: secretspec.md
   - Android: android.md
@@ -9,3 +10,4 @@ nav:
   - Codespaces / devcontainer: codespaces-devcontainer.md
   - Difftastic: difftastic.md
   - Delta: delta.md
+  - treefmt: treefmt.md

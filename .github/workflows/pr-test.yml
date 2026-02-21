@@ -8,13 +8,26 @@ on:
       - "requirements.in"
       - "requirements.txt"
 
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref (tag or branch) to test'
+        required: true
+        default: 'main'
+        type: string
+      only:
+        description: 'Only run specific tests (passed to --only flag)'
+        required: false
+        type: string
+
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: "${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.ref || github.ref }}"
   cancel-in-progress: true
 
 jobs:
   pipeline:
     name: pipeline (${{ matrix.system }})
+
     strategy:
       fail-fast: false
       matrix:
@@ -27,8 +40,11 @@ jobs:
             runs-on: '["self-hosted", "macOS", "ARM64"]'
           - system: x86_64-darwin
             runs-on: '["macos-15-intel"]'
+
     uses: ./.github/workflows/per-system-pipeline.yml
     secrets: inherit
     with:
       system: ${{ matrix.system }}
       runs-on: ${{ matrix.runs-on }}
+      ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.ref || '' }}
+      only: ${{ inputs.only }}

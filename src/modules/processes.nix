@@ -1,18 +1,187 @@
 { config, options, lib, pkgs, ... }:
 let
   types = lib.types;
+  listenType = import ./lib/listen.nix { inherit lib; };
+  readyType = import ./lib/ready.nix { inherit lib; };
 
-  processType = types.submodule ({ config, ... }: {
+  # Get primops from _module.args (set via specialArgs in bootstrapLib.nix)
+  # Use default empty attrset if not available (e.g., when evaluated without devenv CLI)
+  devenvPrimops = config._module.args.devenvPrimops or { };
+
+  # Capture primop for use in submodule (specialArgs don't propagate to types.submodule)
+  # Signature: allocatePort processName portName basePort
+  allocatePort = devenvPrimops.allocatePort or (_proc: _port: base: base);
+
+  # Port type factory - needs process name for stable cache key
+  mkPortType = processName: types.submodule ({ config, name, ... }: {
     options = {
+      allocate = lib.mkOption {
+        type = types.port;
+        description = "Base port for auto-allocation (increments until free)";
+        example = 8080;
+      };
+
+      value = lib.mkOption {
+        type = types.port;
+        readOnly = true;
+        description = "Resolved port value (allocated by devenv)";
+        defaultText = lib.literalMD "Allocated port based on `allocate`";
+        # Pass process name and port name for stable caching across evaluations
+        default = allocatePort processName name config.allocate;
+      };
+    };
+  });
+
+  processType = types.submodule ({ config, name, ... }: {
+    options = {
+      enable = lib.mkOption {
+        type = types.bool;
+        default = true;
+        description = "Whether to start this process automatically with `devenv up`.";
+      };
+
       exec = lib.mkOption {
         type = types.str;
         description = "Bash code to run the process.";
+      };
+
+      ports = lib.mkOption {
+        type = types.attrsOf (mkPortType name);
+        default = { };
+        description = ''
+          Named ports with auto-allocation for this process.
+
+          Define ports with a base value and devenv will automatically find
+          a free port starting from that base, incrementing until available.
+
+          The resolved port is available via `config.processes.<name>.ports.<port>.value`.
+
+          Requires devenv 2.0+.
+        '';
+        example = lib.literalExpression ''
+          {
+            http.allocate = 8080;
+            admin.allocate = 9000;
+          }
+        '';
+      };
+
+      env = lib.mkOption {
+        type = types.attrsOf types.str;
+        default = { };
+        description = "Environment variables to set for this process.";
       };
 
       cwd = lib.mkOption {
         type = types.nullOr types.str;
         default = null;
         description = "Working directory to run the process in. If not specified, the current working directory will be used.";
+      };
+
+      ready = lib.mkOption {
+        type = types.nullOr readyType;
+        default = null;
+        description = ''
+          How to determine if this process is ready to serve.
+
+          Requires devenv 2.0+.
+        '';
+      };
+
+      restart = lib.mkOption {
+        type = types.submodule {
+          options = {
+            on = lib.mkOption {
+              type = types.enum [ "never" "always" "on_failure" ];
+              default = "on_failure";
+              description = "When to restart: never, always, or on_failure.";
+            };
+            max = lib.mkOption {
+              type = types.nullOr types.int;
+              default = 5;
+              description = "Maximum restart attempts. null = unlimited.";
+            };
+            window = lib.mkOption {
+              type = types.nullOr types.ints.unsigned;
+              default = null;
+              description = "Sliding window in seconds for restart rate limiting. null = lifetime limit.";
+            };
+          };
+        };
+        default = { };
+        description = "Process restart policy.";
+      };
+
+      listen = lib.mkOption {
+        type = types.listOf listenType;
+        default = [ ];
+        description = ''
+          Socket activation configuration for systemd-style socket passing.
+
+          Requires devenv 2.0+.
+        '';
+        example = [
+          {
+            name = "http";
+            kind = "tcp";
+            address = "127.0.0.1:8080";
+          }
+          {
+            name = "admin";
+            kind = "unix_stream";
+            path = "$DEVENV_STATE/admin.sock";
+            mode = 384; # 0o600
+          }
+        ];
+      };
+
+      watchdog = lib.mkOption {
+        type = types.nullOr (types.submodule {
+          options = {
+            usec = lib.mkOption {
+              type = types.int;
+              description = "Watchdog interval in microseconds";
+            };
+
+            require_ready = lib.mkOption {
+              type = types.bool;
+              default = true;
+              description = "Require READY=1 notification before enforcing watchdog";
+            };
+          };
+        });
+        default = null;
+        description = ''
+          Systemd watchdog configuration.
+
+          Requires devenv 2.0+.
+        '';
+        example = lib.literalExpression ''
+          {
+            usec = 30000000; # 30 seconds
+            require_ready = true;
+          }
+        '';
+      };
+
+      after = lib.mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        description = ''
+          Tasks that must be ready before this process starts.
+          Use task names like "devenv:processes:postgres" or "myapp:setup".
+          Supports @ready (default) and @complete suffixes.
+        '';
+        example = [ "devenv:processes:postgres" "myapp:migrations@complete" ];
+      };
+
+      before = lib.mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        description = ''
+          Tasks that should start after this process is ready.
+        '';
+        example = [ "devenv:processes:nginx" ];
       };
 
       process-compose = lib.mkOption {
@@ -37,6 +206,87 @@ let
             "process_completed_successfully";
         };
       };
+
+      linux = lib.mkOption {
+        type = types.submodule {
+          options = {
+            capabilities = lib.mkOption {
+              type = types.listOf types.str;
+              default = [ ];
+              description = ''
+                Linux capabilities to add as ambient capabilities for this process
+                (e.g., "cap_net_admin", "cap_sys_admin").
+
+                Requires devenv 2.0+.
+              '';
+              example = [ "cap_net_admin" "cap_sys_admin" ];
+            };
+          };
+        };
+        default = { };
+        description = ''
+          Linux-specific process configuration.
+
+          Requires devenv 2.0+.
+        '';
+      };
+
+      watch = lib.mkOption {
+        type = types.submodule {
+          options = {
+            paths = lib.mkOption {
+              type = types.listOf types.path;
+              default = [ ];
+              description = ''
+                Paths to watch for changes (files or directories).
+                When files in these paths change, the process will be restarted.
+
+                Requires devenv 2.0+.
+              '';
+              example = lib.literalExpression ''
+                [ ./src ./config.yaml ]
+              '';
+            };
+
+            extensions = lib.mkOption {
+              type = types.listOf types.str;
+              default = [ ];
+              description = ''
+                File extensions to watch (e.g., "rs", "js", "py").
+                If empty, all file extensions are watched.
+
+                Requires devenv 2.0+.
+              '';
+              example = [ "rs" "toml" ];
+            };
+
+            ignore = lib.mkOption {
+              type = types.listOf types.str;
+              default = [ ];
+              description = ''
+                Glob patterns to ignore (e.g., ".git", "target", "*.log").
+
+                Requires devenv 2.0+.
+              '';
+              example = [ "*.log" ".git" "target" ];
+            };
+          };
+        };
+        default = { };
+        description = ''
+          File watching configuration for automatic process restarts.
+
+          Requires devenv 2.0+.
+        '';
+        example = lib.literalExpression ''
+          {
+            paths = [ ./src ];
+            extensions = [ "rs" "toml" ];
+            ignore = [ "target" ];
+          }
+        '';
+      };
+
     };
   });
 
@@ -67,8 +317,12 @@ in
       implementation = lib.mkOption {
         type = types.enum supportedImplementations;
         description = "The process manager to use when running processes with ``devenv up``.";
-        default = "process-compose";
-        example = "overmind";
+        default =
+          if config.devenv.cli.version != null && lib.versionAtLeast config.devenv.cli.version "2.0"
+          then "native"
+          else "process-compose";
+        defaultText = lib.literalMD "`native` for devenv 2.0+, `process-compose` otherwise";
+        example = "process-compose";
       };
 
       before = lib.mkOption {
@@ -119,76 +373,136 @@ in
       internal = true;
       default = pkgs.writeShellScript "no-processes" "";
     };
+
+    process.taskCommandsBase = lib.mkOption {
+      type = types.attrsOf types.str;
+      internal = true;
+      description = "The base command to run each process through devenv-tasks, supporting before/after task dependencies.";
+    };
+
+    process.taskCommands = lib.mkOption {
+      type = types.attrsOf types.str;
+      internal = true;
+      description = "The command to run each process through devenv-tasks with exec prefix for proper signal handling.";
+    };
+
+    process.nativeConfigJson = lib.mkOption {
+      type = types.package;
+      internal = true;
+      default = pkgs.writeText "process-config.json" (builtins.toJSON { });
+      description = "JSON configuration for native process manager";
+    };
   };
 
-  config = lib.mkIf (config.processes != { }) {
-    assertions = [{
-      assertion =
-        let
-          enabledImplementations =
-            lib.pipe supportedImplementations [
-              (map (name: config.process.managers.${name}.enable))
-              (lib.filter lib.id)
-            ];
-        in
-        lib.length enabledImplementations == 1;
-      message = ''
-        Only a single process manager can be enabled at a time.
-      '';
-    }];
+  config = lib.mkMerge [
+    # Always resolve and enable the correct process manager implementation.
+    # Making this conditional on processes has the potential of triggering infinite recursion.
+    #
+    # Suppose the user defines processes with a `mkIf` conditional on an env var.
+    # The module system needs to merge:
+    #
+    #   config.processes -> config.env -> any mkIf'd env in the process manager ->  config.process.managers.${implementation}.enable -> config.processes -> ...
+    #
+    # Infinite recursion, oh my!
+    {
+      assertions = [{
+        assertion =
+          let
+            enabledImplementations =
+              lib.pipe supportedImplementations [
+                (map (name: config.process.managers.${name}.enable))
+                (lib.filter lib.id)
+              ];
+          in
+          lib.length enabledImplementations == 1;
+        message = ''
+          Only a single process manager can be enabled at a time.
+        '';
+      }];
 
-    process.managers.${implementation}.enable = lib.mkDefault true;
+      process.managers.${implementation}.enable = lib.mkDefault true;
+    }
 
-    # Create tasks for each defined process
-    tasks = lib.mapAttrs'
-      (name: process: {
-        name = "devenv:processes:${name}";
-        value = {
-          type = "process";
-          exec = process.exec;
-          cwd = process.cwd;
-        };
-      })
-      config.processes;
-
-    procfile =
-      pkgs.writeText "procfile" (lib.concatStringsSep "\n"
-        (lib.mapAttrsToList (name: process: "${name}: exec ${config.task.package}/bin/devenv-tasks run --task-file ${config.task.config} --mode all devenv:processes:${name}")
-          config.processes));
-
-    procfileEnv =
+    (lib.mkIf options.processes.isDefined (
       let
-        envList =
-          lib.mapAttrsToList
-            (name: value: "${name}=${builtins.toJSON value}")
-            config.env;
+        enabledProcesses = lib.filterAttrs (_: p: p.enable) config.processes;
       in
-      pkgs.writeText "procfile-env" (lib.concatStringsSep "\n" envList);
+      {
+        # Create tasks only for enabled processes (native manager discovers process tasks from this)
+        tasks = lib.mapAttrs'
+          (name: process: {
+            name = "devenv:processes:${name}";
+            value = {
+              type = "process";
+              exec = process.exec;
+              env = process.env;
+              cwd = process.cwd;
+              after = process.after;
+              before = process.before;
+              # Always show output for process tasks so process-compose can capture it
+              showOutput = true;
+              # Process-specific configuration
+              ready = process.ready;
+              restart = process.restart;
+              listen = process.listen;
+              ports = lib.mapAttrs (_: portCfg: portCfg.value) process.ports;
+              watch = process.watch;
+              watchdog = process.watchdog;
+            };
+          })
+          enabledProcesses;
 
-    procfileScript = pkgs.writeShellScript "devenv-up" ''
-      ${lib.optionalString config.devenv.debug "set -x"}
+        # Provide the devenv-tasks command for each enabled process so process managers can use it
+        # to support before/after task dependencies
+        process.taskCommandsBase = lib.mapAttrs
+          (name: _: "${config.task.package}/bin/devenv-tasks run --task-file ${config.task.config} --mode all --cache-dir ${lib.escapeShellArg config.devenv.dotfile} --runtime-dir ${lib.escapeShellArg config.devenv.runtime} devenv:processes:${name}")
+          enabledProcesses;
 
-      ${config.process.manager.before}
+        # With exec prefix for proper signal handling (derived from base)
+        process.taskCommands = lib.mapAttrs
+          (name: cmd: "exec ${cmd}")
+          config.process.taskCommandsBase;
 
-      ${config.process.manager.command}
+        procfile =
+          pkgs.writeText "procfile" (lib.concatStringsSep "\n"
+            (lib.mapAttrsToList (name: _: "${name}: ${config.process.taskCommands.${name}}")
+              enabledProcesses));
 
-      backgroundPID=$!
+        procfileEnv =
+          let
+            envList =
+              lib.mapAttrsToList
+                (name: value: "${name}=${builtins.toJSON value}")
+                config.env;
+          in
+          pkgs.writeText "procfile-env" (lib.concatStringsSep "\n" envList);
 
-      down() {
-        echo "Stopping processes..."
-        kill -TERM $backgroundPID
-        wait $backgroundPID
-        ${config.process.manager.after}
-        echo "Processes stopped."
+        procfileScript = pkgs.writeShellScript "devenv-up" ''
+          ${lib.optionalString config.devenv.debug "set -x"}
+
+          ${config.process.manager.before}
+
+          ${config.process.manager.command}
+
+          backgroundPID=$!
+
+          down() {
+            echo "Stopping processes..."
+            kill -TERM $backgroundPID
+            wait $backgroundPID
+            ${config.process.manager.after}
+            echo "Processes stopped."
+          }
+
+          trap down SIGINT SIGTERM
+
+          wait
+        '';
+
+        ci = [ config.procfileScript ];
+
+        infoSections."processes" = lib.mapAttrsToList (name: process: "${name}: exec ${pkgs.writeShellScript name process.exec}") enabledProcesses;
       }
-
-      trap down SIGINT SIGTERM
-
-      wait
-    '';
-
-    ci = [ config.procfileScript ];
-
-    infoSections."processes" = lib.mapAttrsToList (name: process: "${name}: exec ${pkgs.writeShellScript name process.exec}") config.processes;
-  };
+    ))
+  ];
 }

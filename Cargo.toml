@@ -2,19 +2,28 @@
 resolver = "2"
 members = [
   "devenv",
+  "devenv-activity",
+  "devenv-activity-macros",
   "devenv-cache-core",
+  "devenv-core",
   "devenv-eval-cache",
-  "devenv-generate",
+  "devenv-event-sources",
+  "devenv-nix-backend",
+  "devenv-nix-backend-macros",
+  "devenv-processes",
+  "devenv-reload",
   "devenv-run-tests",
+  "devenv-shell",
+  "devenv-snix-backend",
   "devenv-tasks",
-  "http-client-tls",
+  "devenv-tui",
   "nix-conf-parser",
   "tokio-shutdown",
   "xtask",
 ]
 
 [workspace.package]
-version = "1.10.1"
+version = "2.0.0"
 edition = "2024"
 license = "APACHE-2.0"
 homepage = "https://devenv.sh/"
@@ -22,20 +31,47 @@ repository = "https://github.com/cachix/devenv/"
 
 [workspace.dependencies]
 devenv = { path = "devenv" }
+devenv-activity = { path = "devenv-activity" }
+devenv-activity-macros = { path = "devenv-activity-macros" }
+devenv-core = { path = "devenv-core" }
 devenv-eval-cache = { path = "devenv-eval-cache" }
+devenv-event-sources = { path = "devenv-event-sources" }
+devenv-processes = { path = "devenv-processes" }
 devenv-run-tests = { path = "devenv-run-tests" }
+devenv-snix-backend = { path = "devenv-snix-backend" }
+devenv-nix-backend = { path = "devenv-nix-backend" }
+devenv-nix-backend-macros = { path = "devenv-nix-backend-macros" }
 devenv-tasks = { path = "devenv-tasks" }
+devenv-tui = { path = "devenv-tui" }
+devenv-reload = { path = "devenv-reload" }
+devenv-shell = { path = "devenv-shell" }
 devenv-cache-core = { path = "devenv-cache-core" }
-http-client-tls = { path = "http-client-tls" }
 nix-conf-parser = { path = "nix-conf-parser" }
 tokio-shutdown = { path = "tokio-shutdown" }
 xtask = { path = "xtask" }
 
+nix-bindings-flake = { git = "https://github.com/cachix/nix-bindings-rust.git", branch = "for-upstream" }
+nix-bindings-expr = { git = "https://github.com/cachix/nix-bindings-rust.git", branch = "for-upstream" }
+nix-bindings-store = { git = "https://github.com/cachix/nix-bindings-rust.git", branch = "for-upstream" }
+nix-bindings-util = { git = "https://github.com/cachix/nix-bindings-rust.git", branch = "for-upstream" }
+nix-bindings-fetchers = { git = "https://github.com/cachix/nix-bindings-rust.git", branch = "for-upstream" }
+nix-cmd = { git = "https://github.com/cachix/nix-bindings-rust.git", branch = "for-upstream" }
+nix-bindings-bindgen-raw = { git = "https://github.com/cachix/nix-bindings-rust.git", branch = "for-upstream" }
+
+avt = "0.17"
+base64 = "0.22"
+anyhow = "1.0.92"
 ansiterm = "0.12.2"
+astral-tokio-tar = "0.5.6"
+async-priority-channel = "0.2.0"
 async-trait = "0.1"
 binaryornot = "1.0.0"
 blake3 = "1.8.2"
+chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5.48", features = ["derive", "cargo", "env"] }
+clap_complete = { version = "4.5.58", features = ["unstable-dynamic"] }
+cstr = "0.2"
+daemonize = "0.5"
 cli-table = "0.5.0"
 console = "0.16.1"
 dotlock = "0.5.0"
@@ -44,6 +80,7 @@ fd-lock = "4"
 futures = "0.3.31"
 hex = "0.4.3"
 hostname = "0.4.1"
+humantime = "2"
 include_dir = "0.7.4"
 indexmap = "2.11.4"
 indoc = "2.0.6"
@@ -51,9 +88,12 @@ lazy_static = "1.5.0"
 pathdiff = "0.2.3"
 miette = { version = "7.6.0", features = ["fancy"] }
 nix = { version = "0.30.1", features = ["signal", "process"] }
+num_enum = "0.7"
 once_cell = "1.21.3"
 petgraph = "0.8.2"
 pretty_assertions = { version = "1.4.1", features = ["unstable"] }
+netstat2 = "0.11"
+rand = "0.8.5"
 regex = "1.11.3"
 schemars = "1.0.4"
 schematic = { version = "0.18.12", features = [
@@ -63,20 +103,32 @@ schematic = { version = "0.18.12", features = [
   "renderer_json_schema",
 ] }
 secrecy = "0.10"
-secretspec = "0.3.3"
+# https://github.com/mikaelmello/inquire/pull/330
+secretspec = { git = "https://github.com/cachix/secretspec", tag = "v0.7.1" }
 serde = { version = "1.0.226", features = ["derive"] }
 serde_json = "1.0.145"
 serde_repr = "0.1.20"
+serde_with = "3"
 serde_yaml = "0.9.34"
+ser_nix = "0.2.2"
 similar = "2.7.0"
 sha2 = "0.10.9"
+shell-escape = "0.1.5"
+strip-ansi-escapes = "0.2"
 sqlx = { version = "0.8.6", features = ["time", "sqlite", "runtime-tokio"] }
+strum = { version = "0.27", features = ["derive"] }
 tempfile = "3.23.0"
+termimad = "0.30.0"
+tokio-test = "0.4"
 thiserror = "2.0.16"
-tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
-tracing-indicatif = "=0.3.9"
-indicatif = "0.17.11"
+tracing = { version = "0.1.41", features = ["valuable"] }
+tracing-subscriber = { version = "0.3.20", features = [
+  "env-filter",
+  "json",
+  "valuable",
+] }
+valuable = { version = "0.1", features = ["derive"] }
+json-subscriber = { version = "0.2.6" }
 tokio = { version = "1.47.1", features = [
   "process",
   "fs",
@@ -87,30 +139,56 @@ tokio = { version = "1.47.1", features = [
   "time",
 ] }
 tokio-util = { version = "0.7.16", features = ["io"] }
+tokio-stream = "0.1"
+uuid = { version = "1.18", features = ["v4"] }
 which = "8.0.0"
 whoami = "1.6.1"
 xdg = "3.0.0"
-tokio-tar = "0.3.1"
 walkdir = "2.5"
+url = "2"
+human-repr = "1.1"
+insta = { version = "1.40", features = ["filters", "json"] }
+watchexec = "8.0"
+watchexec-filterer-globset = "8.0"
+watchexec-supervisor = "5.0"
+signal-hook = "0.3"
+signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
+socket2 = "0.5"
+ctrlc = "3.4"
+process-wrap = { version = "9.0", features = ["tokio1"] }
+portable-pty = "0.9.0"
 
-# The version of rustls must match the version used by reqwest to set up rustls-platform-verifier.
-# If you encounter an error, lock these versions down.
-# Keep webpki certificates by default, to avoid issues with downstream dependencies.
-reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"] }
-rustls = { version = "0.23.32" }
-rustls-platform-verifier = "0.6.1"
-shell-escape = "0.1.5"
-rmcp = { version = "0.7", features = ["server", "transport-io"] }
+reqwest = { version = "0.13", features = ["json", "query", "stream"] }
+axum = "0.8"
+caps = "0.5"
+rmcp = { version = "0.7", features = [
+  "server",
+  "transport-io",
+  "transport-streamable-http-server",
+] }
 rmcp-macros = "0.7"
+sd-notify = "0.4"
 
 # Optional snix dependencies
-snix-eval = { git = "https://github.com/cachix/snix" }
-snix-glue = { git = "https://github.com/cachix/snix" }
-snix-castore = { git = "https://github.com/cachix/snix" }
-snix-store = { git = "https://github.com/cachix/snix" }
-snix-build = { git = "https://github.com/cachix/snix" }
-nix-compat = { git = "https://github.com/cachix/snix" }
-nix-compat-derive = { git = "https://github.com/cachix/snix" }
+snix-eval = { git = "https://github.com/cachix/snix", rev = "50b41ae7e05b423a7525b4dda53d372a71931506" }
+snix-glue = { git = "https://github.com/cachix/snix", rev = "50b41ae7e05b423a7525b4dda53d372a71931506" }
+snix-castore = { git = "https://github.com/cachix/snix", rev = "50b41ae7e05b423a7525b4dda53d372a71931506" }
+snix-store = { git = "https://github.com/cachix/snix", rev = "50b41ae7e05b423a7525b4dda53d372a71931506" }
+snix-build = { git = "https://github.com/cachix/snix", rev = "50b41ae7e05b423a7525b4dda53d372a71931506" }
+nix-compat = { git = "https://github.com/cachix/snix", rev = "50b41ae7e05b423a7525b4dda53d372a71931506" }
+nix-compat-derive = { git = "https://github.com/cachix/snix", rev = "50b41ae7e05b423a7525b4dda53d372a71931506" }
+
+# Ensure crossterm versions match between these
+iocraft = "0.7.16"
+crossterm = "0.28.1"
+
+[patch.crates-io]
+# Patched TUI dependencies to supported rendering to stderr
+# https://github.com/ccbrown/iocraft/pull/157
+iocraft = { git = "https://github.com/sandydoo/iocraft", branch = "feat-configure-output" }
+# https://github.com/crossterm-rs/crossterm/pull/1026
+crossterm = { git = "https://github.com/sandydoo/crossterm", branch = "0.28-cachix" }
+
 
 [profile.release]
 strip = "symbols"

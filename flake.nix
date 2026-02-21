@@ -2,8 +2,8 @@
   description = "devenv.sh - Fast, Declarative, Reproducible, and Composable Developer Environments";
 
   nixConfig = {
-    extra-trusted-public-keys = "devenv.cachix.org-1:w1cLUi8dv3hnoSPGAuibQv+f9TZLr6cv/Hm9XgU50cw=";
-    extra-substituters = "https://devenv.cachix.org";
+    extra-trusted-public-keys = "devenv.cachix.org-1:w1cLUi8dv3hnoSPGAuibQv+f9TZLr6cv/Hm9XgU50cw= cachix.cachix.org-1:eWNHQldwUO7G2VkjpnjDbWwy4KQ/HNxht7H4SSoMckM=";
+    extra-substituters = "https://devenv.cachix.org https://cachix.cachix.org";
   };
 
   # this needs to be rolling so we're testing what most devs are using
@@ -26,7 +26,7 @@
     };
   };
   inputs.nix = {
-    url = "github:cachix/nix/devenv-2.30.5";
+    url = "github:cachix/nix/devenv-2.32";
     inputs = {
       nixpkgs.follows = "nixpkgs";
       flake-compat.follows = "flake-compat";
@@ -40,9 +40,16 @@
     url = "github:cachix/cachix/latest";
     inputs = {
       nixpkgs.follows = "nixpkgs";
-      flake-compat.follows = "";
+      flake-compat.follows = "flake-compat";
       git-hooks.follows = "git-hooks";
       devenv.follows = "";
+    };
+  };
+  inputs.nixd = {
+    url = "github:nix-community/nixd";
+    inputs = {
+      nixpkgs.follows = "nixpkgs";
+      flake-parts.follows = "flake-parts";
     };
   };
 
@@ -61,75 +68,7 @@
         "aarch64-linux"
         "aarch64-darwin"
       ];
-      forAllSystems =
-        f:
-        builtins.listToAttrs (
-          map
-            (name: {
-              inherit name;
-              value = f name;
-            })
-            systems
-        );
-      mkDocOptions =
-        { pkgs, options, docOpts ? { } }:
-        let
-          inherit (pkgs) lib;
-          sources = [
-            {
-              name = "${self}";
-              url = "https://github.com/cachix/devenv/blob/main";
-            }
-            {
-              name = "${git-hooks}";
-              url = "https://github.com/cachix/git-hooks.nix/blob/master";
-            }
-          ];
-          rewriteSource =
-            decl:
-            let
-              prefix = lib.strings.concatStringsSep "/" (lib.lists.take 4 (lib.strings.splitString "/" decl));
-              source = lib.lists.findFirst (src: src.name == prefix) { } sources;
-              path = lib.strings.removePrefix prefix decl;
-              url = "${source.url}${path}";
-            in
-            {
-              name = url;
-              url = url;
-            };
-
-          filterOptions = import ./filterOptions.nix lib;
-
-          # Apply a filter to process git-hooks options
-          filterGitHooks =
-            path: opt:
-            # Test if path starts with "git-hooks.hooks"
-            if lib.lists.hasPrefix [ "git-hooks" "hooks" ] path then
-            # Document the generic submodule options: git-hooks.hooks.<name>.<option>
-              if builtins.elemAt path 2 == "_freeformOptions" then
-                true
-              else
-              # For pre-configured hooks, document certain values, like the settings and description.
-              # Importantly, don't document the generic submodule options to avoid cluttering the docs.
-                if
-                  builtins.elem (builtins.elemAt path 3) [
-                    "enable"
-                    "description"
-                    "packageOverrides"
-                    "settings"
-                  ]
-                then
-                  true
-                else
-                  false
-            else
-              true;
-
-        in
-        pkgs.nixosOptionsDoc ({
-          options = filterOptions filterGitHooks (builtins.removeAttrs options [ "_module" ]);
-          transformOptions = opt: (opt // { declarations = map rewriteSource opt.declarations; });
-        } // docOpts);
+      forAllSystems = nixpkgs.lib.genAttrs systems;
     in
     {
       packages = forAllSystems (
@@ -137,105 +76,24 @@
         let
           overlays = [
             (final: prev: {
-              devenv-nix = inputs.nix.packages.${system}.nix-cli;
-              cachix = inputs.cachix.packages.${system}.cachix;
+              inherit (inputs.cachix.packages.${system}) cachix;
+              nix = inputs.nix.packages.${system}.nix;
+              nixd = inputs.nixd.packages.${system}.nixd;
             })
           ];
           pkgs = import nixpkgs { inherit overlays system; };
-          workspace = pkgs.callPackage ./workspace.nix { };
-
-          evaluatedModules = pkgs.lib.evalModules {
-            modules = [
-              ./src/modules/top-level.nix
-              # Don't emit version warnings when building docs
-              { devenv.warnOnNewVersion = false; }
-            ];
-            specialArgs = { inherit pkgs inputs; };
-          };
-          options = mkDocOptions { pkgs = pkgs; options = evaluatedModules.options; };
+          gitRev = self.shortRev or (self.dirtyShortRev or "");
+          workspace = pkgs.callPackage ./workspace.nix { inherit gitRev; };
         in
         {
-          inherit (workspace) devenv devenv-tasks devenv-tasks-fast-build;
+          inherit (workspace.crates) devenv devenv-tasks devenv-tasks-fast-build;
           default = self.packages.${system}.devenv;
-          devenv-docs-options = options.optionsCommonMark;
-          devenv-docs-options-json = options.optionsJSON;
-          devenv-generate-individual-docs =
-            let
-              inherit (pkgs) lib;
-
-              generateOptionDocs = options: mkDocOptions { inherit pkgs options; docOpts = { variablelistId = "options"; }; };
-
-              # Default doc template
-              defaultDoc = ''
-                [comment]: # (Please add your documentation above this line)
-
-                @AUTOGEN_OPTIONS@
-              '';
-
-              # The docs to generate:
-              #   - options: the options to generate docs for
-              #   - srcDir: where to find existing docs
-              #   - outDir: where to write the generated docs
-              docs = [
-                {
-                  options = evaluatedModules.options.languages;
-                  srcDir = "./languages";
-                  outDir = "$out/docs/individual-docs/supported-languages";
-                }
-                {
-                  options = evaluatedModules.options.services;
-                  srcDir = "./services";
-                  outDir = "$out/docs/individual-docs/supported-services";
-                }
-                {
-                  options = evaluatedModules.options.process.managers;
-                  srcDir = "./process-managers";
-                  outDir = "$out/docs/individual-docs/supported-process-managers";
-                }
-              ];
-            in
-            pkgs.stdenv.mkDerivation {
-              name = "generate-individual-docs";
-              src = ./docs/src/individual-docs;
-              allowSubstitutes = false;
-              buildPhase = ''
-                AUTOGEN_NOTICE="[comment]: # (Do not edit this file as it is autogenerated. Go to docs/individual-docs if you want to make edits.)"
-
-                ${lib.concatStringsSep "\n" (
-                  lib.map ({ options, srcDir, outDir }:
-                  ''
-                    mkdir -p ${outDir}
-
-                    ${lib.concatStringsSep "\n" (
-                      lib.mapAttrsToList (name: options: ''
-                        srcFile=${srcDir}/${name}.md
-                        outFile=${outDir}/${name}.md
-                        optionsFile=${(generateOptionDocs options).optionsCommonMark}
-
-                        # Create output file with autogen notice
-                        echo "$AUTOGEN_NOTICE" > "$outFile"
-
-                        # Append source content or default template
-                        if [ -f "$srcFile" ]; then
-                          tail -n +1 "$srcFile" >> "$outFile"
-                        else
-                          echo "${defaultDoc}" >> "$outFile"
-                        fi
-
-                        # Process and substitute options in place
-                        substituteInPlace "$outFile" --subst-var-by AUTOGEN_OPTIONS "$(
-                          echo "## Options"
-                          echo
-                          sed 's/^## /### /g' "$optionsFile"
-                        )"
-
-                      '') options
-                    )}
-                  ''
-                  ) docs
-                )}
-              '';
-            };
+        }
+        // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          devenv-image = import ./containers/devenv/image.nix {
+            inherit pkgs;
+            inherit (self.packages.${system}) devenv;
+          };
         }
       );
 
@@ -255,8 +113,8 @@
             '';
           };
 
-          simple = {
-            path = ./templates/simple;
+          flake = {
+            path = ./templates/flake;
             description = "A direnv supported Nix flake with devenv integration.";
             welcomeText = ''
               # `.devenv` should be added to `.gitignore`
@@ -265,9 +123,7 @@
               ```
             '';
           };
-        in
-        {
-          inherit simple flake-parts;
+
           terraform = {
             path = ./templates/terraform;
             description = "A Terraform Nix flake with devenv integration.";
@@ -278,7 +134,11 @@
               ```
             '';
           };
-          default = simple;
+        in
+        {
+          inherit flake flake-parts terraform;
+          simple = flake; # Backwards compatibility
+          default = self.templates.flake;
         };
 
       flakeModule = self.flakeModules.default; # Backwards compatibility
@@ -299,41 +159,44 @@
       };
 
       lib = {
-        mkConfig =
+        mkConfig = args: (self.lib.mkEval args).config;
+
+        mkEval =
           args@{ pkgs
           , inputs
           , modules
-          ,
-          }:
-          (self.lib.mkEval args).config;
-        mkEval =
-          { pkgs
-          , inputs
-          , modules
+          , lib ? pkgs.lib
           ,
           }:
           let
-            moduleInputs = {
-              inherit git-hooks;
-            } // inputs;
-            project = inputs.nixpkgs.lib.evalModules {
-              specialArgs = moduleInputs // {
-                inputs = moduleInputs;
-              };
-              modules = [
-                { config._module.args.pkgs = inputs.nixpkgs.lib.mkDefault pkgs; }
-                (self.modules + /top-level.nix)
-                (
-                  { config, ... }:
-                  {
-                    devenv.warnOnNewVersion = false;
-                    devenv.flakesIntegration = true;
-                  }
-                )
-              ] ++ modules;
+            # TODO: deprecate default git-hooks input
+            defaultInputs = { inherit git-hooks; };
+            finalInputs = defaultInputs // inputs;
+
+            specialArgs = finalInputs // {
+              inputs = finalInputs;
             };
+
+            modules = [
+              (self.modules + /top-level.nix)
+              (
+                { config, ... }:
+                {
+                  # Configure overlays
+                  _module.args.pkgs = pkgs.appendOverlays config.overlays;
+                  # Enable the flakes integration
+                  devenv.flakesIntegration = true;
+                  # Disable CLI version checks
+                  devenv.warnOnNewVersion = false;
+                }
+              )
+            ]
+            ++ args.modules;
+
+            project = lib.evalModules { inherit modules specialArgs; };
           in
           project;
+
         mkShell =
           args:
           let
@@ -341,8 +204,8 @@
           in
           config.shell
           // {
-            ci = config.ciDerivation;
             inherit config;
+            ci = config.ciDerivation;
           };
       };
 

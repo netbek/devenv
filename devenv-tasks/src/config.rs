@@ -1,9 +1,10 @@
 use crate::SudoContext;
 use crate::error::Error;
 use crate::types::{DependencyKind, DependencySpec, TaskType};
+use devenv_processes::ProcessConfig;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct TaskConfig {
     pub name: String,
     #[serde(default)]
@@ -19,9 +20,17 @@ pub struct TaskConfig {
     #[serde(default)]
     pub exec_if_modified: Vec<String>,
     #[serde(default)]
-    pub inputs: Option<serde_json::Value>,
+    pub input: Option<serde_json::Value>,
     #[serde(default)]
     pub cwd: Option<String>,
+    #[serde(default)]
+    pub show_output: bool,
+    /// Environment variables to set for this task
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+    /// Process-specific configuration (only used when type = "process")
+    #[serde(default)]
+    pub process: Option<ProcessConfig>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, clap::ValueEnum)]
@@ -43,8 +52,17 @@ pub struct Config {
     pub tasks: Vec<TaskConfig>,
     pub roots: Vec<String>,
     pub run_mode: RunMode,
+    /// Runtime directory for process manager (from $DEVENV_STATE)
+    #[serde(default)]
+    pub runtime_dir: std::path::PathBuf,
+    /// Cache directory for task database (from $DEVENV_DOTFILE)
+    #[serde(default)]
+    pub cache_dir: std::path::PathBuf,
     #[serde(skip)]
     pub sudo_context: Option<SudoContext>,
+    /// Environment variables to pass to processes
+    #[serde(skip, default)]
+    pub env: std::collections::HashMap<String, String>,
 }
 
 impl TryFrom<serde_json::Value> for Config {
@@ -58,13 +76,25 @@ impl TryFrom<serde_json::Value> for Config {
 /// Parse a dependency string with optional suffix notation
 ///
 /// Supported formats:
-/// - "task" -> DependencySpec { name: "task", kind: Ready } (default)
-/// - "task@ready" -> DependencySpec { name: "task", kind: Ready }
-/// - "task@complete" -> DependencySpec { name: "task", kind: Complete }
+/// - "task" -> DependencySpec { name: "task", kind: None } (use default based on task type)
+/// - "task@ready" -> DependencySpec { name: "task", kind: Some(Ready) }
+/// - "task@complete" -> DependencySpec { name: "task", kind: Some(Complete) }
+///
+/// Default behavior (when kind is None):
+/// - For process tasks: wait for ready (@ready)
+/// - For oneshot tasks: wait for completion (@complete)
 ///
 /// Returns an error if the suffix is invalid or '@' appears in the middle of the name
 pub fn parse_dependency(dep: &str) -> Result<DependencySpec, Error> {
     if let Some((name, suffix)) = dep.rsplit_once('@') {
+        // Validate that name is not empty
+        if name.is_empty() {
+            return Err(Error::InvalidDependency(format!(
+                "Invalid dependency '{}': task name cannot be empty",
+                dep
+            )));
+        }
+
         // Validate that name doesn't contain '@' (only one '@' allowed at the end)
         if name.contains('@') {
             return Err(Error::InvalidDependency(format!(
@@ -74,8 +104,8 @@ pub fn parse_dependency(dep: &str) -> Result<DependencySpec, Error> {
         }
 
         let kind = match suffix {
-            "ready" => DependencyKind::Ready,
-            "complete" => DependencyKind::Complete,
+            "ready" => Some(DependencyKind::Ready),
+            "complete" => Some(DependencyKind::Complete),
             _ => {
                 return Err(Error::InvalidDependency(format!(
                     "Invalid dependency '{}': suffix must be '@ready' or '@complete', got '@{}'",
@@ -89,10 +119,10 @@ pub fn parse_dependency(dep: &str) -> Result<DependencySpec, Error> {
             kind,
         })
     } else {
-        // No suffix, default to Ready
+        // No suffix, use default based on task type (resolved later)
         Ok(DependencySpec {
             name: dep.to_string(),
-            kind: DependencyKind::Ready,
+            kind: None,
         })
     }
 }
@@ -105,21 +135,22 @@ mod tests {
     fn test_parse_dependency_no_suffix() {
         let spec = parse_dependency("postgres").unwrap();
         assert_eq!(spec.name, "postgres");
-        assert_eq!(spec.kind, DependencyKind::Ready);
+        // No suffix means None - default will be determined by task type
+        assert_eq!(spec.kind, None);
     }
 
     #[test]
     fn test_parse_dependency_ready_suffix() {
         let spec = parse_dependency("postgres@ready").unwrap();
         assert_eq!(spec.name, "postgres");
-        assert_eq!(spec.kind, DependencyKind::Ready);
+        assert_eq!(spec.kind, Some(DependencyKind::Ready));
     }
 
     #[test]
     fn test_parse_dependency_complete_suffix() {
         let spec = parse_dependency("postgres@complete").unwrap();
         assert_eq!(spec.name, "postgres");
-        assert_eq!(spec.kind, DependencyKind::Complete);
+        assert_eq!(spec.kind, Some(DependencyKind::Complete));
     }
 
     #[test]
@@ -147,9 +178,21 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_dependency_empty_name() {
+        let result = parse_dependency("@complete");
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("task name cannot be empty")
+        );
+    }
+
+    #[test]
     fn test_parse_dependency_with_namespace() {
         let spec = parse_dependency("devenv:processes:postgres@complete").unwrap();
         assert_eq!(spec.name, "devenv:processes:postgres");
-        assert_eq!(spec.kind, DependencyKind::Complete);
+        assert_eq!(spec.kind, Some(DependencyKind::Complete));
     }
 }

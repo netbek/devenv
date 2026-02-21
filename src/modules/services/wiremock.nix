@@ -2,6 +2,11 @@
 with lib;
 let
   cfg = config.services.wiremock;
+
+  # Port allocation
+  basePort = cfg.port;
+  allocatedPort = config.processes.wiremock.ports.main.value;
+
   mappingsFormat = pkgs.formats.json { };
   rootDir = pkgs.linkFarm "wiremock-root" [
     {
@@ -24,7 +29,7 @@ in
       '';
     };
     port = mkOption {
-      type = types.int;
+      type = types.port;
       default = 8080;
       description = ''
         The port number for the HTTP server to listen on.
@@ -80,17 +85,18 @@ in
   };
 
   config = mkIf cfg.enable {
+    processes.wiremock.ports.main.allocate = basePort;
     processes.wiremock.exec =
       let
         arguments = [
-          "--port ${toString cfg.port}"
+          "--port ${toString allocatedPort}"
           "--root-dir ${rootDir}"
         ]
         ++ lib.optional cfg.disableBanner "--disable-banner"
         ++ lib.optional cfg.verbose "--verbose";
       in
       ''
-        ${cfg.package}/bin/wiremock ${lib.concatStringsSep " " arguments} "$@"
+        exec ${cfg.package}/bin/wiremock ${lib.concatStringsSep " " arguments} "$@"
       '';
   };
 }

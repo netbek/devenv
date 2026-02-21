@@ -1,15 +1,40 @@
+pub mod changelog;
 pub mod cli;
-pub mod config;
 mod devenv;
-pub mod log;
+pub mod lsp;
 pub mod mcp;
-pub(crate) mod nix;
-pub mod nix_backend;
 pub mod nix_log_bridge;
-#[cfg(feature = "snix")]
-pub(crate) mod snix_backend;
+pub mod reload;
+pub mod tracing;
+pub use devenv_processes as processes;
 mod util;
 
-pub use cli::{GlobalOptions, default_system};
-pub use devenv::{DIRENVRC, DIRENVRC_VERSION, Devenv, DevenvOptions, ProcessOptions};
+#[cfg(feature = "snix")]
+pub use devenv_snix_backend;
+
+pub use devenv::{
+    DIRENVRC, DIRENVRC_VERSION, Devenv, DevenvOptions, ProcessOptions, RunMode,
+    SecretsNeedPrompting, ShellCommand,
+};
 pub use devenv_tasks as tasks;
+
+// Re-export core types from devenv-core for convenience
+pub use devenv_core::{
+    CachixCacheInfo, CachixManager, CachixPaths, Config, DevenvPaths, GlobalOptions, NixArgs,
+    NixBackend, Options, SecretspecData, default_system,
+};
+
+/// Returns true if this binary was NOT built from a release tag.
+///
+/// Uses build-time info from build.rs:
+/// - `DEVENV_ON_RELEASE_TAG`: "true" when HEAD is on an exact tag (cargo builds with .git)
+/// - `DEVENV_IS_RELEASE`: "1" for Nix release builds (set in package.nix, .git unavailable)
+pub fn is_development_version() -> bool {
+    if env!("DEVENV_ON_RELEASE_TAG") == "true" {
+        return false;
+    }
+    if option_env!("DEVENV_IS_RELEASE") == Some("1") {
+        return false;
+    }
+    true
+}

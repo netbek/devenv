@@ -1,0 +1,89 @@
+[package]
+name = "devenv-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Core async runtime
+tokio = { workspace = true, features = [
+  "macros",
+  "rt-multi-thread",
+  "sync",
+  "time",
+  "signal",
+] }
+tokio-shutdown = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# TUI library
+iocraft.workspace = true
+crossterm = { workspace = true }
+
+# Tracing integration
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Data structures
+indexmap = { workspace = true }
+
+# Terminal state management
+libc = "0.2"
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+miette = { workspace = true }
+
+# CLI argument parsing
+clap = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Nix log parsing
+devenv-eval-cache = { path = "../devenv-eval-cache" }
+
+# Activity system
+devenv-activity = { path = "../devenv-activity" }
+
+# Process control
+devenv-processes = { path = "../devenv-processes" }
+
+# Shell session management (provides ShellSession, protocol types)
+devenv-shell = { path = "../devenv-shell" }
+
+# Shared task types
+devenv-cache-core = { path = "../devenv-cache-core" }
+
+# Time handling
+once_cell = { workspace = true }
+chrono = { workspace = true }
+
+# Human-readable formatting
+human-repr = { workspace = true }
+
+# URL parsing
+url = { workspace = true }
+
+# Random number generation
+rand = { workspace = true }
+
+# Regex for ANSI stripping
+regex = { workspace = true }
+
+# Terminal UI components
+console = { workspace = true }
+
+# Base64 encoding (for OSC 52 clipboard)
+base64 = { workspace = true }
+[[bin]]
+name = "tui-replay"
+path = "src/bin/tui-replay.rs"
+
+[dev-dependencies]
+insta = { workspace = true }

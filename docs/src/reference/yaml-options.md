@@ -28,9 +28,15 @@
 | nixpkgs.per-platform.&lt;system&gt;.permittedInsecurePackages | (per-platform) A list of insecure permitted packages. Defaults to `[]`        |
 | nixpkgs.per-platform.&lt;system&gt;.permittedUnfreePackages   | (per-platform) A list of unfree packages to allow by name. Defaults to `[]`   |
 |                                                               |                                                                               |
+| profile                                                       | Default profile to activate. Can be overridden by `--profile` CLI flags.       |
+|                                                               |                                                                               |
 | secretspec.enable                                             | Enable [secretspec integration](../integrations/secretspec.md). Defaults to `false`.                           |
 | secretspec.profile                                            | Secretspec profile name to use.                                               |
 | secretspec.provider                                           | Secretspec provider to use.                                                   |
+
+!!! note "Added in 1.11"
+
+    - `profile`
 
 !!! note "Added in 1.9"
 
@@ -68,7 +74,7 @@ We'll list the most common examples below.
 - `github:NixOS/nixpkgs/master`
 - `github:NixOS/nixpkgs?rev=238b18d7b2c8239f676358634bfb32693d3706f3`
 - `github:org/repo?dir=subdir`
-- `github:org/repo?tag=v1.0.0`
+- `github:org/repo?ref=v1.0.0`
 
 #### GitLab
 

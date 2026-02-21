@@ -7,6 +7,7 @@ let
     else config.name;
   types = lib.types;
   envContainerName = builtins.getEnv "DEVENV_CONTAINER";
+  projectRoot = builtins.path { path = self; name = "source"; };
 
   nix2containerInput = config.lib.getInput {
     name = "nix2container";
@@ -42,7 +43,7 @@ let
 
   mkHome = path: (pkgs.runCommand "devenv-container-home" { } ''
     mkdir -p $out${homeDir}
-    cp -R ${path}/. $out${homeDir}/
+    cp -r ${path} $out${homeDir}/
   '');
 
   mkMultiHome = paths: map mkHome paths;
@@ -146,13 +147,16 @@ let
     config = {
       Entrypoint = cfg.entrypoint;
       User = "${user}";
-      WorkingDir = "${homeDir}";
+      WorkingDir = cfg.workingDir;
       Env = lib.mapAttrsToList
         (name: value:
           "${name}=${toString value}"
         )
         config.env ++ [ "HOME=${homeDir}" "USER=${user}" ];
-      Cmd = [ cfg.startupCommand ];
+      Cmd =
+        if builtins.isList cfg.startupCommand
+        then cfg.startupCommand
+        else [ cfg.startupCommand ];
     };
   };
 
@@ -202,13 +206,19 @@ let
       copyToRoot = lib.mkOption {
         type = types.either types.path (types.listOf types.path);
         description = "Add a path to the container. Defaults to the whole git repo.";
-        default = self;
+        default = projectRoot;
         defaultText = lib.literalExpression "self";
       };
 
       startupCommand = lib.mkOption {
-        type = types.nullOr (types.either types.str types.package);
-        description = "Command to run in the container.";
+        type = types.nullOr (types.oneOf [ types.str types.package (types.listOf types.str) ]);
+        description = ''
+          Command to run in the container.
+
+          Can be a string, a package, or a list of strings for individual arguments.
+          Use a list when your entrypoint expects separate arguments, e.g.:
+          `startupCommand = [ "-f" "/var/lib/haproxy/haproxy.cfg" ];`
+        '';
         default = null;
       };
 
@@ -217,6 +227,12 @@ let
         description = "Entrypoint of the container.";
         default = [ (mkEntrypoint config) ];
         defaultText = lib.literalExpression "[ entrypoint ]";
+      };
+
+      workingDir = lib.mkOption {
+        type = types.str;
+        description = "Working directory of the container.";
+        default = homeDir;
       };
 
       defaultCopyArgs = lib.mkOption {
@@ -367,7 +383,11 @@ let
         type = types.package;
         internal = true;
         default = pkgs.writeShellScript "docker-run" ''
-          docker run -it ${config.name}:${config.version} "$@"
+          if [ -t 0 ]; then
+            docker run -it ${config.name}:${config.version} "$@"
+          else
+            docker run -i ${config.name}:${config.version} "$@"
+          fi
         '';
       };
     };

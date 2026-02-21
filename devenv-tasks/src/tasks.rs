@@ -1,15 +1,17 @@
 use crate::config::{Config, RunMode, parse_dependency};
 use crate::error::Error;
+use crate::executor::{SubprocessExecutor, TaskExecutor};
 use crate::task_cache::TaskCache;
 use crate::task_state::TaskState;
-use crate::tracing_events;
 use crate::types::{
-    DependencyKind, Output, Outputs, Skipped, TaskCompleted, TaskFailure, TaskStatus, TasksStatus,
-    VerbosityLevel,
+    DependencyKind, Output, Outputs, Skipped, TaskCompleted, TaskFailure, TaskStatus, TaskType,
+    TasksStatus, VerbosityLevel,
 };
-use petgraph::algo::toposort;
+use devenv_activity::{Activity, ActivityInstrument, TaskInfo, emit_task_hierarchy, next_id};
+use devenv_processes::{ListenKind, NativeProcessManager};
+use petgraph::algo::{has_path_connecting, toposort};
 use petgraph::graph::{DiGraph, NodeIndex};
-use petgraph::visit::EdgeRef;
+use petgraph::visit::{EdgeRef, Reversed};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -24,10 +26,12 @@ pub struct TasksBuilder {
     verbosity: VerbosityLevel,
     db_path: Option<PathBuf>,
     shutdown: Arc<tokio_shutdown::Shutdown>,
+    executor: Option<Arc<dyn TaskExecutor>>,
+    refresh_task_cache: bool,
 }
 
 impl TasksBuilder {
-    /// Create a new builder with required configuration and subsys
+    /// Create a new builder with required configuration
     pub fn new(
         config: Config,
         verbosity: VerbosityLevel,
@@ -38,12 +42,26 @@ impl TasksBuilder {
             verbosity,
             db_path: None,
             shutdown,
+            executor: None,
+            refresh_task_cache: false,
         }
     }
 
-    /// Set the database path
+    /// Set the database path for task caching
     pub fn with_db_path(mut self, db_path: PathBuf) -> Self {
         self.db_path = Some(db_path);
+        self
+    }
+
+    /// Set a custom task executor (defaults to subprocess executor)
+    pub fn with_executor(mut self, executor: Arc<dyn TaskExecutor>) -> Self {
+        self.executor = Some(executor);
+        self
+    }
+
+    /// Force a refresh of the task cache, skipping cache reads
+    pub fn with_refresh_task_cache(mut self, refresh_task_cache: bool) -> Self {
+        self.refresh_task_cache = refresh_task_cache;
         self
     }
 
@@ -56,12 +74,21 @@ impl TasksBuilder {
                 )))
             })?
         } else {
-            TaskCache::new().await.map_err(|e| {
+            TaskCache::new(&self.config.cache_dir).await.map_err(|e| {
                 Error::IoError(std::io::Error::other(format!(
                     "Failed to initialize task cache: {e}"
                 )))
             })?
         };
+
+        // Create process manager for long-running process tasks
+        let process_manager = Arc::new(
+            NativeProcessManager::new(self.config.runtime_dir.clone()).map_err(|e| {
+                Error::IoError(std::io::Error::other(format!(
+                    "Failed to initialize process manager: {e}"
+                )))
+            })?,
+        );
 
         let mut graph = DiGraph::new();
         let mut task_indices = HashMap::new();
@@ -94,6 +121,9 @@ impl TasksBuilder {
         }
 
         let roots = Tasks::resolve_namespace_roots(&self.config.roots, &task_indices)?;
+        let executor = self
+            .executor
+            .unwrap_or_else(|| Arc::new(SubprocessExecutor::new()));
         let mut tasks = Tasks {
             roots,
             root_names: self.config.roots,
@@ -105,6 +135,10 @@ impl TasksBuilder {
             run_mode: self.config.run_mode,
             cache,
             shutdown: self.shutdown,
+            process_manager,
+            env: self.config.env,
+            executor,
+            refresh_task_cache: self.refresh_task_cache,
         };
 
         tasks.resolve_dependencies(task_indices).await?;
@@ -135,6 +169,13 @@ pub struct Tasks {
     pub run_mode: RunMode,
     pub cache: TaskCache,
     pub shutdown: Arc<tokio_shutdown::Shutdown>,
+    /// Process manager for running long-lived process tasks
+    pub process_manager: Arc<NativeProcessManager>,
+    /// Environment variables to pass to processes
+    pub env: HashMap<String, String>,
+    pub executor: Arc<dyn TaskExecutor>,
+    /// Force a refresh of the task cache, skipping cache reads
+    pub refresh_task_cache: bool,
 }
 
 impl Tasks {
@@ -226,6 +267,7 @@ impl Tasks {
     ) -> Result<(), Error> {
         let mut unresolved = HashSet::new();
         let mut edges_to_add = Vec::new();
+        let mut validation_errors = Vec::new();
 
         for index in self.graph.node_indices() {
             let task_state = &self.graph[index].read().await;
@@ -235,7 +277,44 @@ impl Tasks {
                 let dep_spec = parse_dependency(dep_name)?;
 
                 if let Some(dep_idx) = task_indices.get(&dep_spec.name) {
-                    edges_to_add.push((*dep_idx, index, dep_spec.kind));
+                    let dep_task = &self.graph[*dep_idx].read().await;
+
+                    // Resolve the dependency kind based on task type if not explicitly specified
+                    // Default: Ready for process tasks, Complete for oneshot tasks
+                    let resolved_kind = dep_spec.kind.unwrap_or_else(|| {
+                        if dep_task.task.r#type == TaskType::Process {
+                            DependencyKind::Ready
+                        } else {
+                            DependencyKind::Complete
+                        }
+                    });
+
+                    // Validate @ready dependencies on process tasks require ready or listen
+                    if resolved_kind == DependencyKind::Ready
+                        && dep_task.task.r#type == TaskType::Process
+                    {
+                        let has_ready = dep_task
+                            .task
+                            .process
+                            .as_ref()
+                            .map_or(false, |p| p.ready.is_some());
+                        let has_listen = dep_task.task.process.as_ref().map_or(false, |p| {
+                            p.listen.iter().any(|spec| spec.kind == ListenKind::Tcp)
+                        });
+                        let has_ports = dep_task
+                            .task
+                            .process
+                            .as_ref()
+                            .map_or(false, |p| !p.ports.is_empty());
+                        if !has_ready && !has_listen && !has_ports {
+                            validation_errors.push(format!(
+                                "Task '{}' depends on '{}@ready' but process has no ready config, TCP listen config, or allocated ports. \
+                                 Add a ready probe, configure a TCP listen socket, or allocate ports for the process.",
+                                task_state.task.name, dep_spec.name
+                            ));
+                        }
+                    }
+                    edges_to_add.push((*dep_idx, index, resolved_kind));
                 } else {
                     unresolved.insert((task_state.task.name.clone(), dep_name.clone()));
                 }
@@ -246,11 +325,51 @@ impl Tasks {
                 let dep_spec = parse_dependency(before_name)?;
 
                 if let Some(before_idx) = task_indices.get(&dep_spec.name) {
-                    edges_to_add.push((index, *before_idx, dep_spec.kind));
+                    // For 'before' relationships, the current task is the dependency source
+                    // Resolve kind based on current task's type if not explicitly specified
+                    let resolved_kind = dep_spec.kind.unwrap_or_else(|| {
+                        if task_state.task.r#type == TaskType::Process {
+                            DependencyKind::Ready
+                        } else {
+                            DependencyKind::Complete
+                        }
+                    });
+
+                    // Validate @ready dependencies - current task must have ready or listen if it's a process
+                    if resolved_kind == DependencyKind::Ready
+                        && task_state.task.r#type == TaskType::Process
+                    {
+                        let has_ready = task_state
+                            .task
+                            .process
+                            .as_ref()
+                            .map_or(false, |p| p.ready.is_some());
+                        let has_listen = task_state.task.process.as_ref().map_or(false, |p| {
+                            p.listen.iter().any(|spec| spec.kind == ListenKind::Tcp)
+                        });
+                        let has_ports = task_state
+                            .task
+                            .process
+                            .as_ref()
+                            .map_or(false, |p| !p.ports.is_empty());
+                        if !has_ready && !has_listen && !has_ports {
+                            validation_errors.push(format!(
+                                "Process '{}' has tasks depending on it via @ready but has no ready config, TCP listen config, or allocated ports. \
+                                 Add a ready probe, configure a TCP listen socket, or allocate ports for the process.",
+                                task_state.task.name
+                            ));
+                        }
+                    }
+                    edges_to_add.push((index, *before_idx, resolved_kind));
                 } else {
                     unresolved.insert((task_state.task.name.clone(), before_name.clone()));
                 }
             }
+        }
+
+        // Return validation errors first
+        if !validation_errors.is_empty() {
+            return Err(Error::InvalidDependency(validation_errors.join("\n")));
         }
 
         for (from, to, kind) in edges_to_add {
@@ -311,11 +430,39 @@ impl Tasks {
                 }
             }
             RunMode::All => {
-                // Include the complete connected subgraph (all dependencies in both directions)
+                // Include prerequisites (incoming) and dependents (outgoing) separately.
+                // This avoids "direction bouncing" through intermediate nodes that would
+                // incorrectly include unrelated tasks sharing a common prerequisite.
+                // See: https://github.com/cachix/devenv/issues/2337
+
+                // First: traverse incoming edges (prerequisites) from roots
                 while let Some(node) = to_visit.pop() {
                     if visited.insert(node) {
-                        // Add all connected neighbors in both directions
-                        for neighbor in self.graph.neighbors_undirected(node) {
+                        for neighbor in self
+                            .graph
+                            .neighbors_directed(node, petgraph::Direction::Incoming)
+                        {
+                            to_visit.push(neighbor);
+                        }
+                    }
+                }
+
+                // Second: traverse outgoing edges (dependents) from roots
+                // Start by adding outgoing neighbors of roots (roots are already visited)
+                for &root_index in &self.roots {
+                    for neighbor in self
+                        .graph
+                        .neighbors_directed(root_index, petgraph::Direction::Outgoing)
+                    {
+                        to_visit.push(neighbor);
+                    }
+                }
+                while let Some(node) = to_visit.pop() {
+                    if visited.insert(node) {
+                        for neighbor in self
+                            .graph
+                            .neighbors_directed(node, petgraph::Direction::Outgoing)
+                        {
                             to_visit.push(neighbor);
                         }
                     }
@@ -358,12 +505,78 @@ impl Tasks {
     }
 
     #[instrument(skip(self))]
-    pub async fn run(&self) -> Outputs {
+    pub async fn run(&self, is_process_mode: bool) -> Outputs {
+        // Create an orchestration-level Operation activity to track overall progress
+        // Using Operation (not Task) so it doesn't count in the task summary
+        let (label, item_type) = if is_process_mode {
+            ("Running processes", "processes")
+        } else {
+            ("Running tasks", "tasks")
+        };
+        let orchestration_activity = Arc::new(
+            Activity::operation(label)
+                .detail(format!(
+                    "{} {}, roots: {:?}",
+                    self.tasks_order.len(),
+                    item_type,
+                    self.root_names
+                ))
+                .parent(None)
+                .start(),
+        );
+
+        self.run_internal(orchestration_activity).await
+    }
+
+    /// Run with a caller-provided parent activity instead of creating a new top-level one.
+    /// Used by `up()` Phase 4 to nest process execution under "Running processes".
+    #[instrument(skip(self, parent_activity))]
+    pub async fn run_with_parent_activity(&self, parent_activity: Arc<Activity>) -> Outputs {
+        self.run_internal(parent_activity).await
+    }
+
+    async fn run_internal(&self, orchestration_activity: Arc<Activity>) -> Outputs {
+        // Assign activity IDs upfront for all tasks
+        let mut task_ids: HashMap<NodeIndex, u64> = HashMap::new();
+        for &index in &self.tasks_order {
+            task_ids.insert(index, next_id());
+        }
+
+        // Build TaskInfo for all tasks
+        let mut task_infos: Vec<TaskInfo> = Vec::new();
+        for &index in &self.tasks_order {
+            let task_state = self.graph[index].read().await;
+            let task_id = task_ids[&index];
+
+            task_infos.push(TaskInfo {
+                id: task_id,
+                name: task_state.task.name.clone(),
+                show_output: task_state.task.show_output,
+                is_process: task_state.task.r#type == crate::types::TaskType::Process,
+            });
+        }
+
+        // Compute hierarchy edges using the extracted function
+        let edges = compute_hierarchy_edges(
+            &self.graph,
+            &self.tasks_order,
+            &self.roots,
+            &task_ids,
+            orchestration_activity.id(),
+        );
+
+        // Emit hierarchy once upfront
+        emit_task_hierarchy(task_infos, edges);
+
+        let total_tasks = self.tasks_order.len() as u64;
+        let completed_tasks = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
         let outputs = Arc::new(Mutex::new(BTreeMap::new()));
         let mut running_tasks = self.shutdown.join_set();
 
         for index in &self.tasks_order {
             let task_state = &self.graph[*index];
+            let task_activity_id = task_ids[index];
 
             let mut cancelled = self.shutdown.is_cancelled();
             let mut dependency_failed = false;
@@ -373,28 +586,55 @@ impl Tasks {
                 'dependency_check: loop {
                     let mut dependencies_completed = true;
 
-                    for dep_index in self
+                    // Check each dependency with its edge weight (Ready or Complete)
+                    for edge in self
                         .graph
-                        .neighbors_directed(*index, petgraph::Direction::Incoming)
+                        .edges_directed(*index, petgraph::Direction::Incoming)
                     {
-                        match &self.graph[dep_index].read().await.status {
-                            TaskStatus::Completed(completed) => {
-                                if completed.has_failed() {
-                                    dependency_failed = true;
-                                    break 'dependency_check;
-                                }
+                        let dep_index = edge.source();
+                        let dep_kind = edge.weight();
+                        let dep_status = &self.graph[dep_index].read().await.status;
+
+                        let satisfied = match (dep_status, dep_kind) {
+                            // @ready dependencies
+                            (TaskStatus::ProcessReady, DependencyKind::Ready) => {
+                                // Process is ready and healthy
+                                true
                             }
-                            TaskStatus::ProcessReady => {
-                                // Process is ready and healthy, dependency is satisfied
+                            (
+                                TaskStatus::Completed(TaskCompleted::Success(_, _)),
+                                DependencyKind::Ready,
+                            ) => {
+                                // Oneshot task completed successfully
+                                true
                             }
-                            TaskStatus::Pending => {
-                                dependencies_completed = false;
-                                break;
+                            (
+                                TaskStatus::Completed(TaskCompleted::Skipped(_)),
+                                DependencyKind::Ready,
+                            ) => {
+                                // Task was skipped (cached or no command)
+                                true
                             }
-                            TaskStatus::Running(_) => {
-                                dependencies_completed = false;
-                                break;
+
+                            // @complete dependencies
+                            (TaskStatus::Completed(_), DependencyKind::Complete) => {
+                                // Task has completed (any completion state)
+                                true
                             }
+
+                            // Failure handling
+                            (TaskStatus::Completed(completed), _) if completed.has_failed() => {
+                                dependency_failed = true;
+                                break 'dependency_check;
+                            }
+
+                            // Not yet satisfied
+                            _ => false,
+                        };
+
+                        if !satisfied {
+                            dependencies_completed = false;
+                            break;
                         }
                     }
 
@@ -412,12 +652,6 @@ impl Tasks {
                 }
             }
 
-            let task_name = {
-                let task_state = task_state.read().await;
-                // TODO: remove clone
-                task_state.task.name.clone()
-            };
-
             if cancelled || dependency_failed {
                 let task_completed = if cancelled {
                     TaskCompleted::Cancelled(None)
@@ -425,20 +659,23 @@ impl Tasks {
                     TaskCompleted::DependencyFailed
                 };
 
-                let tracing_status = task_completed.to_tracing_status();
+                // Create a minimal activity just to emit the completion event
+                let skip_activity = Activity::task_with_id(task_activity_id);
 
-                tracing_events::emit_task_completed(
-                    &task_name,
-                    "completed",
-                    tracing_status,
-                    None,
-                    Some(tracing_status),
-                );
+                if cancelled {
+                    skip_activity.cancel();
+                } else {
+                    skip_activity.dependency_failed();
+                }
 
                 {
                     let mut task_state = task_state.write().await;
                     task_state.status = TaskStatus::Completed(task_completed);
                 }
+
+                // Update orchestration progress
+                let done = completed_tasks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                orchestration_activity.progress(done, total_tasks, None);
 
                 self.notify_finished.notify_one();
                 self.notify_ui.notify_one();
@@ -447,6 +684,63 @@ impl Tasks {
 
             // Run the task
 
+            // Check if this is a process task (long-running)
+            let is_process_task = {
+                let task_state = task_state.read().await;
+                task_state.task.r#type == TaskType::Process
+            };
+
+            if is_process_task {
+                // Process task: spawn and transition to ProcessReady immediately
+                // Process activities are created as direct children of orchestration activity
+
+                let task_state_clone = Arc::clone(task_state);
+                let notify_finished_clone = Arc::clone(&self.notify_finished);
+                let notify_ui_clone = Arc::clone(&self.notify_ui);
+                let process_manager_clone = self.process_manager.clone();
+                let parent_id = orchestration_activity.id();
+                let env = &self.env;
+
+                // Spawn the process using the process manager
+                match task_state_clone
+                    .write()
+                    .await
+                    .run_process(&process_manager_clone, Some(parent_id), env)
+                    .await
+                {
+                    Ok(()) => {
+                        // Process is now running and ready
+                        notify_finished_clone.notify_one();
+                        notify_ui_clone.notify_one();
+                    }
+                    Err(e) => {
+                        // Failed to start process
+                        let mut task_state = task_state_clone.write().await;
+                        error!(
+                            "Failed to start process task {}: {}",
+                            task_state.task.name, e
+                        );
+                        task_state.status = TaskStatus::Completed(TaskCompleted::Failed(
+                            std::time::Duration::ZERO,
+                            TaskFailure {
+                                stdout: Vec::new(),
+                                stderr: Vec::new(),
+                                error: format!("Failed to start process: {e}"),
+                            },
+                        ));
+                        notify_finished_clone.notify_one();
+                        notify_ui_clone.notify_one();
+                    }
+                }
+
+                // Update orchestration progress once the process is started or failed.
+                let done = completed_tasks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                orchestration_activity.progress(done, total_tasks, None);
+
+                continue;
+            }
+
+            // Oneshot task: run once and complete
             // Reset the timer
             let now = Instant::now();
 
@@ -455,10 +749,7 @@ impl Tasks {
                 task_state.status = TaskStatus::Running(now);
             };
 
-            // TODO: do we need two separate events here?
-            tracing_events::emit_task_start(&task_name);
-            tracing_events::emit_task_status_change(&task_name, "running", None);
-
+            // Notify UI that task is starting
             self.notify_ui.notify_one();
 
             // TODO: consider Arc-ing self at this point
@@ -469,159 +760,508 @@ impl Tasks {
             // TODO: remove this clone
             let cache = Arc::new(self.cache.clone());
             let shutdown_clone = Arc::clone(&self.shutdown);
+            let orchestration_activity_clone = Arc::clone(&orchestration_activity);
+            let completed_tasks_clone = Arc::clone(&completed_tasks);
+            let executor_clone = Arc::clone(&self.executor);
+            let refresh_task_cache = self.refresh_task_cache;
+            let shell_env = self.env.clone();
 
-            running_tasks.spawn(move || async move {
-                let completed = {
-                    let outputs = outputs_clone.lock().await.clone();
-                    match task_state_clone
-                        .read()
-                        .await
-                        .run(now, &outputs, &cache, shutdown_clone.cancellation_token())
-                        .await
-                    {
-                        Ok(result) => result,
-                        Err(e) => {
-                            error!("Task failed with error: {}", e);
-                            TaskCompleted::Failed(
-                                now.elapsed(),
-                                TaskFailure {
-                                    stdout: Vec::new(),
-                                    stderr: Vec::new(),
-                                    error: format!("Task failed: {e}"),
-                                },
+            running_tasks.spawn(move || {
+                // Clone for use inside the async block; the original is borrowed by in_activity
+                let orchestration_activity_inner = Arc::clone(&orchestration_activity_clone);
+
+                // Run the task within the orchestration activity's parent context
+                // so child task activities have proper parent-child relationships and tracing spans
+                async move {
+                    let completed = {
+                        let outputs = outputs_clone.lock().await.clone();
+                        match task_state_clone
+                            .read()
+                            .await
+                            .run(
+                                now,
+                                &outputs,
+                                &cache,
+                                shutdown_clone.cancellation_token(),
+                                task_activity_id,
+                                executor_clone.as_ref(),
+                                refresh_task_cache,
+                                &shell_env,
                             )
+                            .await
+                        {
+                            Ok(result) => result,
+                            Err(e) => {
+                                error!("Task failed with error: {}", e);
+                                TaskCompleted::Failed(
+                                    now.elapsed(),
+                                    TaskFailure {
+                                        stdout: Vec::new(),
+                                        stderr: Vec::new(),
+                                        error: format!("Task failed: {e:#}"),
+                                    },
+                                )
+                            }
                         }
-                    }
-                };
-                {
-                    let mut task_state = task_state_clone.write().await;
-                    match &completed {
-                        TaskCompleted::Success(_, Output(Some(output))) => {
-                            outputs_clone
-                                .lock()
-                                .await
-                                // TODO: remove clone
-                                .insert(task_state.task.name.clone(), output.clone());
-
-                            // Store the task output for all tasks to support future reuse
-                            if let Some(output_value) = output.as_object() {
-                                let task_name = &task_state.task.name;
-                                if let Err(e) = cache
-                                    .store_task_output(
-                                        task_name,
-                                        &serde_json::Value::Object(output_value.clone()),
-                                    )
+                    };
+                    {
+                        let mut task_state = task_state_clone.write().await;
+                        match &completed {
+                            TaskCompleted::Success(_, Output(Some(output))) => {
+                                outputs_clone
+                                    .lock()
                                     .await
-                                {
-                                    tracing::warn!(
-                                        "Failed to store task output for {}: {}",
-                                        task_name,
-                                        e
-                                    );
+                                    // TODO: remove clone
+                                    .insert(task_state.task.name.clone(), output.clone());
+
+                                // Store the task output for all tasks to support future reuse
+                                if let Some(output_value) = output.as_object() {
+                                    let task_name = &task_state.task.name;
+                                    if let Err(e) = cache
+                                        .store_task_output(
+                                            task_name,
+                                            &serde_json::Value::Object(output_value.clone()),
+                                        )
+                                        .await
+                                    {
+                                        tracing::warn!(
+                                            "Failed to store task output for {}: {}",
+                                            task_name,
+                                            e
+                                        );
+                                    }
                                 }
                             }
-                        }
-                        TaskCompleted::Skipped(Skipped::Cached(Output(Some(output)))) => {
-                            outputs_clone
-                                .lock()
-                                .await
-                                // TODO: fix clone
-                                .insert(task_state.task.name.clone(), output.clone());
-
-                            // Store task output if we're having status or exec_if_modified
-                            if (task_state.task.status.is_some()
-                                || !task_state.task.exec_if_modified.is_empty())
-                                && let Some(output_value) = output.as_object()
-                            {
-                                let task_name = &task_state.task.name;
-                                if let Err(e) = cache
-                                    .store_task_output(
-                                        task_name,
-                                        &serde_json::Value::Object(output_value.clone()),
-                                    )
+                            TaskCompleted::Skipped(Skipped::Cached(Output(Some(output)))) => {
+                                outputs_clone
+                                    .lock()
                                     .await
+                                    // TODO: fix clone
+                                    .insert(task_state.task.name.clone(), output.clone());
+
+                                // Store task output if we're having status or exec_if_modified
+                                if (task_state.task.status.is_some()
+                                    || !task_state.task.exec_if_modified.is_empty())
+                                    && let Some(output_value) = output.as_object()
                                 {
-                                    tracing::warn!(
-                                        "Failed to store task output for {}: {}",
-                                        task_name,
-                                        e
-                                    );
+                                    let task_name = &task_state.task.name;
+                                    if let Err(e) = cache
+                                        .store_task_output(
+                                            task_name,
+                                            &serde_json::Value::Object(output_value.clone()),
+                                        )
+                                        .await
+                                    {
+                                        tracing::warn!(
+                                            "Failed to store task output for {}: {}",
+                                            task_name,
+                                            e
+                                        );
+                                    }
                                 }
                             }
+                            _ => {}
                         }
-                        _ => {}
+
+                        task_state.status = TaskStatus::Completed(completed);
                     }
 
-                    let task_name = &task_state.task.name;
+                    // Update orchestration progress
+                    let done = completed_tasks_clone
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                        + 1;
+                    orchestration_activity_inner.progress(done, total_tasks, None);
 
-                    // Emit comprehensive tracing event for completion
-                    match &completed {
-                        TaskCompleted::Success(duration, _) => {
-                            tracing_events::emit_task_completed(
-                                task_name,
-                                "completed",
-                                "success",
-                                Some(duration.as_secs_f64()),
-                                None,
-                            );
-                        }
-                        TaskCompleted::Failed(duration, _) => {
-                            tracing_events::emit_task_completed(
-                                task_name,
-                                "completed",
-                                "failed",
-                                Some(duration.as_secs_f64()),
-                                None,
-                            );
-                        }
-                        TaskCompleted::Skipped(skipped) => match skipped {
-                            Skipped::Cached(_) => {
-                                tracing_events::emit_task_completed(
-                                    task_name,
-                                    "completed",
-                                    "cached",
-                                    None,
-                                    Some("cached"),
-                                );
-                            }
-                            Skipped::NoCommand => {
-                                tracing_events::emit_task_completed(
-                                    task_name,
-                                    "completed",
-                                    "skipped",
-                                    None,
-                                    Some("no command"),
-                                );
-                            }
-                        },
-                        TaskCompleted::DependencyFailed => {
-                            // Already emitted above
-                        }
-                        TaskCompleted::Cancelled(duration) => {
-                            tracing_events::emit_task_completed(
-                                task_name,
-                                "completed",
-                                "cancelled",
-                                duration.map(|d| d.as_secs_f64()),
-                                Some("cancelled"),
-                            );
-                        }
-                    }
-
-                    task_state.status = TaskStatus::Completed(completed);
+                    notify_finished_clone.notify_one();
+                    notify_ui_clone.notify_one();
                 }
-
-                notify_finished_clone.notify_one();
-                notify_ui_clone.notify_one();
+                .in_activity(&orchestration_activity_clone)
             });
         }
 
         // Wait for all tasks to complete
         running_tasks.wait_all().await;
 
+        // Check completion status and mark orchestration activity accordingly
+        let status = self.get_completion_status().await;
+
+        if status.failed > 0 || status.dependency_failed > 0 {
+            orchestration_activity.fail();
+        } else if status.cancelled > 0 {
+            orchestration_activity.cancel();
+        }
+
         self.notify_finished.notify_one();
         self.notify_ui.notify_one();
 
         Outputs(Arc::try_unwrap(outputs).unwrap().into_inner())
+    }
+}
+
+/// Compute the hierarchy edges for displaying tasks from task configurations.
+///
+/// This builds a graph from the task configs and computes the display hierarchy,
+/// returning edges as (parent_name, child_name) pairs where root tasks have None
+/// as parent.
+///
+/// # Arguments
+/// * `tasks` - The task configurations to process
+///
+/// # Returns
+/// A vector of (Option<parent_name>, child_name) edges for display
+pub fn compute_display_hierarchy(tasks: &[crate::TaskConfig]) -> Vec<(Option<String>, String)> {
+    use crate::config::parse_dependency;
+
+    if tasks.is_empty() {
+        return Vec::new();
+    }
+
+    // Build a graph from task configs
+    let mut graph: DiGraph<String, ()> = DiGraph::new();
+    let mut name_to_index: HashMap<String, NodeIndex> = HashMap::new();
+
+    // Add all tasks as nodes
+    for task in tasks {
+        let index = graph.add_node(task.name.clone());
+        name_to_index.insert(task.name.clone(), index);
+    }
+
+    // Add edges for dependencies
+    for task in tasks {
+        let Some(&task_index) = name_to_index.get(&task.name) else {
+            continue;
+        };
+
+        // Handle "after" dependencies (task runs after these)
+        for dep_name in &task.after {
+            if let Ok(dep_spec) = parse_dependency(dep_name)
+                && let Some(&dep_index) = name_to_index.get(&dep_spec.name)
+            {
+                // Edge from dependency to dependent (dep -> task)
+                graph.add_edge(dep_index, task_index, ());
+            }
+        }
+
+        // Handle "before" dependencies (task runs before these)
+        for before_name in &task.before {
+            if let Ok(dep_spec) = parse_dependency(before_name)
+                && let Some(&before_index) = name_to_index.get(&dep_spec.name)
+            {
+                // Edge from task to the one that runs after (task -> before)
+                graph.add_edge(task_index, before_index, ());
+            }
+        }
+    }
+
+    // Find roots (tasks with no dependents - nothing runs after them)
+    let roots: Vec<NodeIndex> = graph
+        .node_indices()
+        .filter(|&index| {
+            graph
+                .neighbors_directed(index, petgraph::Direction::Outgoing)
+                .next()
+                .is_none()
+        })
+        .collect();
+
+    // Get topological order (or just iterate if there are cycles)
+    let tasks_order: Vec<NodeIndex> = toposort(&graph, None).unwrap_or_else(|_| {
+        // If there's a cycle, just use all nodes in arbitrary order
+        graph.node_indices().collect()
+    });
+
+    // Compute hierarchy edges using the same algorithm as compute_hierarchy_edges
+    let mut edges = Vec::new();
+
+    for &index in &tasks_order {
+        let task_name = graph[index].clone();
+        let is_root_task = roots.contains(&index);
+
+        if is_root_task {
+            edges.push((None, task_name));
+        } else {
+            // Find dependents (tasks that depend on this task, i.e., run after it)
+            let dependents: Vec<NodeIndex> = graph
+                .neighbors_directed(index, petgraph::Direction::Outgoing)
+                .collect();
+
+            // Filter to uncovered dependents only
+            let uncovered_dependents: Vec<NodeIndex> = dependents
+                .iter()
+                .filter(|&&d1| {
+                    // D1 is uncovered if it doesn't transitively depend on any other dependent D2
+                    !dependents
+                        .iter()
+                        .any(|&d2| d1 != d2 && has_path_connecting(&Reversed(&graph), d1, d2, None))
+                })
+                .copied()
+                .collect();
+
+            if uncovered_dependents.is_empty() {
+                // Fallback to root if no uncovered dependents
+                edges.push((None, task_name));
+            } else {
+                for dependent_index in uncovered_dependents {
+                    let parent_name = graph[dependent_index].clone();
+                    edges.push((Some(parent_name), task_name.clone()));
+                }
+            }
+        }
+    }
+
+    edges
+}
+
+/// Compute the hierarchy edges for displaying tasks in the TUI.
+///
+/// For each task, this finds its "uncovered" dependents - the most immediate
+/// tasks that depend on it. A dependent D1 is "covered" by D2 if D1 transitively
+/// depends on D2. We only create edges from uncovered dependents to avoid
+/// showing a task under a parent that will also show it through a child.
+///
+/// # Arguments
+/// * `graph` - The task dependency graph (edges point from dependency to dependent)
+/// * `tasks_order` - The topological order of tasks to process
+/// * `roots` - The slice of root task indices
+/// * `task_ids` - Mapping from node index to activity ID
+/// * `orchestration_id` - The ID of the orchestration activity (fallback parent)
+///
+/// # Returns
+/// A vector of (parent_id, child_id) edges for the TUI hierarchy
+pub fn compute_hierarchy_edges<N, E>(
+    graph: &DiGraph<N, E>,
+    tasks_order: &[NodeIndex],
+    roots: &[NodeIndex],
+    task_ids: &HashMap<NodeIndex, u64>,
+    orchestration_id: u64,
+) -> Vec<(u64, u64)> {
+    let mut edges = Vec::new();
+
+    for &index in tasks_order {
+        let Some(&task_id) = task_ids.get(&index) else {
+            continue;
+        };
+        let is_root_task = roots.contains(&index);
+
+        if is_root_task {
+            edges.push((orchestration_id, task_id));
+        } else {
+            // Find dependents (tasks that depend on this task)
+            let dependents: Vec<NodeIndex> = graph
+                .neighbors_directed(index, petgraph::Direction::Outgoing)
+                .filter(|dep_index| task_ids.contains_key(dep_index))
+                .collect();
+
+            // Filter to uncovered dependents only
+            let uncovered_dependents: Vec<NodeIndex> = dependents
+                .iter()
+                .filter(|&&d1| {
+                    // D1 is uncovered if it doesn't transitively depend on any other dependent D2
+                    !dependents
+                        .iter()
+                        .any(|&d2| d1 != d2 && has_path_connecting(&Reversed(graph), d1, d2, None))
+                })
+                .copied()
+                .collect();
+
+            for dependent_index in &uncovered_dependents {
+                if let Some(&dependent_id) = task_ids.get(dependent_index) {
+                    edges.push((dependent_id, task_id));
+                }
+            }
+
+            // Fallback to orchestration if no uncovered dependents
+            if uncovered_dependents.is_empty() {
+                edges.push((orchestration_id, task_id));
+            }
+        }
+    }
+
+    edges
+}
+
+#[cfg(test)]
+mod hierarchy_tests {
+    use super::*;
+    use petgraph::graph::DiGraph;
+
+    /// Helper to create a simple graph and compute hierarchy edges.
+    /// Returns (edges, task_ids) where task_ids maps node indices to their IDs.
+    fn setup_test(
+        nodes: usize,
+        graph_edges: &[(usize, usize)],
+        roots: &[usize],
+        tasks_order: &[usize],
+    ) -> (Vec<(u64, u64)>, HashMap<NodeIndex, u64>) {
+        let mut graph: DiGraph<&str, ()> = DiGraph::new();
+        let node_indices: Vec<_> = (0..nodes).map(|_| graph.add_node("task")).collect();
+
+        for &(from, to) in graph_edges {
+            // Edge from dependency to dependent (from is dependency of to)
+            graph.add_edge(node_indices[from], node_indices[to], ());
+        }
+
+        let roots_vec: Vec<_> = roots.iter().map(|&i| node_indices[i]).collect();
+        let order: Vec<_> = tasks_order.iter().map(|&i| node_indices[i]).collect();
+        let task_ids: HashMap<_, _> = node_indices
+            .iter()
+            .enumerate()
+            .map(|(i, &idx)| (idx, (i + 1) as u64))
+            .collect();
+
+        let orchestration_id = 100;
+        let edges =
+            compute_hierarchy_edges(&graph, &order, &roots_vec, &task_ids, orchestration_id);
+        (edges, task_ids)
+    }
+
+    #[test]
+    fn test_single_root_task() {
+        // Single root task should appear under orchestration
+        let (edges, _) = setup_test(1, &[], &[0], &[0]);
+        assert_eq!(edges, vec![(100, 1)]); // orchestration -> task1
+    }
+
+    #[test]
+    fn test_linear_chain() {
+        // Linear chain: task0 -> task1 -> task2 (task0 is dependency of task1, etc.)
+        // task2 is root, task1 depends on task0
+        // Expected hierarchy:
+        //   orchestration -> task2
+        //   task2 -> task1
+        //   task1 -> task0
+        let (edges, _) = setup_test(
+            3,
+            &[(0, 1), (1, 2)], // task0 <- task1 <- task2
+            &[2],              // task2 is root
+            &[0, 1, 2],        // topological order
+        );
+
+        assert!(edges.contains(&(100, 3))); // orchestration -> task2 (id=3)
+        assert!(edges.contains(&(3, 2))); // task2 -> task1
+        assert!(edges.contains(&(2, 1))); // task1 -> task0
+        assert_eq!(edges.len(), 3);
+    }
+
+    #[test]
+    fn test_diamond_dependency() {
+        // Diamond pattern:
+        //     task3 (root)
+        //    /    \
+        // task1   task2
+        //    \    /
+        //     task0 (shared dependency)
+        //
+        // task0 should appear under BOTH task1 and task2
+        let (edges, _) = setup_test(
+            4,
+            &[
+                (0, 1), // task0 <- task1
+                (0, 2), // task0 <- task2
+                (1, 3), // task1 <- task3
+                (2, 3), // task2 <- task3
+            ],
+            &[3],          // task3 is root
+            &[0, 1, 2, 3], // topological order
+        );
+
+        // task3 under orchestration
+        assert!(edges.contains(&(100, 4))); // orchestration -> task3 (id=4)
+        // task1, task2 under task3
+        assert!(edges.contains(&(4, 2))); // task3 -> task1
+        assert!(edges.contains(&(4, 3))); // task3 -> task2
+        // task0 under both task1 and task2 (diamond)
+        assert!(edges.contains(&(2, 1))); // task1 -> task0
+        assert!(edges.contains(&(3, 1))); // task2 -> task0
+        assert_eq!(edges.len(), 5);
+    }
+
+    #[test]
+    fn test_transitive_dependency_not_duplicated() {
+        // Chain where D1 depends on D2 which depends on task0
+        //   task2 (root)
+        //     |
+        //   task1
+        //     |
+        //   task0
+        //
+        // task0 should only appear under task1, not task2
+        // (task2 reaches task0 through task1, so task1 "covers" the path)
+        let (edges, _) = setup_test(3, &[(0, 1), (1, 2)], &[2], &[0, 1, 2]);
+
+        // task0 should only appear under task1, not task2
+        assert!(edges.contains(&(2, 1))); // task1 -> task0
+        assert!(!edges.iter().any(|&(p, c)| p == 3 && c == 1)); // task2 should NOT have edge to task0
+    }
+
+    #[test]
+    fn test_multiple_roots() {
+        // Two independent roots
+        // task0 -> task1 (root)
+        // task2 -> task3 (root)
+        let (edges, _) = setup_test(4, &[(0, 1), (2, 3)], &[1, 3], &[0, 2, 1, 3]);
+
+        // Both roots under orchestration
+        assert!(edges.contains(&(100, 2))); // orchestration -> task1
+        assert!(edges.contains(&(100, 4))); // orchestration -> task3
+        // Dependencies under their roots
+        assert!(edges.contains(&(2, 1))); // task1 -> task0
+        assert!(edges.contains(&(4, 3))); // task3 -> task2
+        assert_eq!(edges.len(), 4);
+    }
+
+    #[test]
+    fn test_task_with_no_dependents_falls_back() {
+        // A non-root task with no dependents in the task order
+        // This can happen if the dependent is filtered out
+        // task0 has no outgoing edges in the filtered graph
+        let (edges, _) = setup_test(
+            2,
+            &[],     // no edges
+            &[1],    // only task1 is root
+            &[0, 1], // task0 is not a root but has no dependents
+        );
+
+        // Both should be under orchestration
+        assert!(edges.contains(&(100, 1))); // orchestration -> task0
+        assert!(edges.contains(&(100, 2))); // orchestration -> task1
+        assert_eq!(edges.len(), 2);
+    }
+
+    #[test]
+    fn test_complex_dag() {
+        // More complex DAG:
+        //       task4 (root)
+        //      /  |  \
+        //   task1 task2 task3
+        //      \  |  /
+        //       task0
+        //
+        // task0 should appear under all three middle tasks
+        let (edges, _) = setup_test(
+            5,
+            &[
+                (0, 1), // task0 <- task1
+                (0, 2), // task0 <- task2
+                (0, 3), // task0 <- task3
+                (1, 4), // task1 <- task4
+                (2, 4), // task2 <- task4
+                (3, 4), // task3 <- task4
+            ],
+            &[4],
+            &[0, 1, 2, 3, 4],
+        );
+
+        // Root under orchestration
+        assert!(edges.contains(&(100, 5))); // orchestration -> task4
+        // Middle layer under root
+        assert!(edges.contains(&(5, 2))); // task4 -> task1
+        assert!(edges.contains(&(5, 3))); // task4 -> task2
+        assert!(edges.contains(&(5, 4))); // task4 -> task3
+        // task0 under all three middle tasks
+        assert!(edges.contains(&(2, 1))); // task1 -> task0
+        assert!(edges.contains(&(3, 1))); // task2 -> task0
+        assert!(edges.contains(&(4, 1))); // task3 -> task0
+        assert_eq!(edges.len(), 7);
     }
 }

@@ -1,6 +1,8 @@
 { pkgs, lib, config, ... }@inputs:
 let
   types = lib.types;
+  listenType = import ./lib/listen.nix { inherit lib; };
+  readyType = import ./lib/ready.nix { inherit lib; };
 
   # Attempt to evaluate devenv-tasks using the exact nixpkgs used by the root devenv flake.
   # If the locked input is not what we expect, fall back to evaluating with the user's nixpkgs.
@@ -25,7 +27,7 @@ let
           pkgs;
       workspace = devenvPkgs.callPackage ./../../workspace.nix { };
     in
-    workspace.devenv-tasks-fast-build;
+    workspace.crates.devenv-tasks-fast-build;
 
   taskType = types.submodule
     ({ name, config, ... }:
@@ -39,12 +41,28 @@ let
                 if config.binary != null
                 then "${pkgs.lib.getBin config.package}/bin/${config.binary}"
                 else pkgs.lib.getExe config.package;
+              isBash =
+                if config.binary != null
+                then config.binary == "bash"
+                else config.package.meta.mainProgram or null == "bash";
+              # Output exports in a format the Rust executor can parse
+              # Format: DEVENV_EXPORT:<base64-encoded-var>=<base64-encoded-value>
+              # Base64 encoding handles special characters safely
+              exportVars = vars: ''
+                for _var in ${lib.concatStringsSep " " vars}; do
+                  if [ -n "''${!_var+x}" ]; then
+                    _var_b64=$(printf '%s' "$_var" | base64 -w0)
+                    _val_b64=$(printf '%s' "''${!_var}" | base64 -w0)
+                    echo "DEVENV_EXPORT:$_var_b64=$_val_b64"
+                  fi
+                done
+              '';
             in
             pkgs.writeScript name ''
               #!${binary}
-              ${lib.optionalString (!isStatus) "set -e"}
+              ${lib.optionalString (!isStatus && isBash) "set -e"}
               ${command}
-              ${lib.optionalString (config.exports != [] && !isStatus) "${inputs.config.task.package}/bin/devenv-tasks export ${lib.concatStringsSep " " config.exports}"}
+              ${lib.optionalString (config.exports != [] && !isStatus) (exportVars config.exports)}
             '';
       in
       {
@@ -109,9 +127,24 @@ let
               command = config.command;
               input = config.input;
               exec_if_modified = config.execIfModified;
+              env = config.env;
               cwd = config.cwd;
+              show_output = config.showOutput;
+              process = {
+                ready = config.ready;
+                restart = config.restart;
+                listen = config.listen;
+                ports = config.ports;
+                watch = config.watch;
+                watchdog = config.watchdog;
+              };
             };
             description = "Internal configuration for the task.";
+          };
+          env = lib.mkOption {
+            type = types.attrsOf types.str;
+            default = { };
+            description = "Environment variables to set for this task.";
           };
           exports = lib.mkOption {
             type = types.listOf types.str;
@@ -123,12 +156,24 @@ let
             default = "";
             description = "Description of the task.";
           };
+          showOutput = lib.mkOption {
+            type = types.bool;
+            default = false;
+            description = "Always show task output (stdout and stderr), regardless of whether the task succeeds or fails.";
+          };
           after = lib.mkOption {
             type = types.listOf types.str;
             description = ''
               List of tasks that must complete before this task runs.
 
               Here's a helpful mnemonic to remember: This task runs *after* these tasks.
+
+              You can append a suffix to control dependency behavior:
+              - `task` or `task@ready` - wait for task to succeed (default, fails if dependency fails)
+              - `task@complete` - wait for task to finish (soft dependency, does NOT propagate failure)
+
+              Example: `after = [ "pnpm:install@complete" ];` allows this task to run
+              even if pnpm:install fails.
             '';
             default = [ ];
           };
@@ -138,6 +183,10 @@ let
               List of tasks that depend on this task completing first.
 
               Here's a helpful mnemonic to remember: This task runs *before* these tasks.
+
+              You can append a suffix to control dependency behavior:
+              - `task` or `task@ready` - the dependent waits for this task to succeed (default)
+              - `task@complete` - the dependent waits for this task to finish (soft dependency)
             '';
             default = [ ];
           };
@@ -151,6 +200,145 @@ let
             default = null;
             description = "Working directory to run the task in. If not specified, the current working directory will be used.";
           };
+
+          ready = lib.mkOption {
+            type = types.nullOr readyType;
+            default = null;
+            description = "How to determine if this process task is ready to serve.";
+          };
+
+          # Process-specific configuration (only used when type = "process")
+          restart = lib.mkOption {
+            type = types.submodule {
+              options = {
+                on = lib.mkOption {
+                  type = types.enum [ "never" "always" "on_failure" ];
+                  default = "on_failure";
+                  description = "When to restart: never, always, or on_failure.";
+                };
+                max = lib.mkOption {
+                  type = types.nullOr types.int;
+                  default = 5;
+                  description = "Maximum restart attempts. null = unlimited.";
+                };
+                window = lib.mkOption {
+                  type = types.nullOr types.ints.unsigned;
+                  default = null;
+                  description = "Sliding window in seconds for restart rate limiting. null = lifetime limit.";
+                };
+              };
+            };
+            default = { };
+            description = "Process restart policy. Only used when type = \"process\".";
+          };
+
+          ports = lib.mkOption {
+            type = types.attrsOf types.port;
+            default = { };
+            description = ''
+              Allocated ports for this process (name -> port number).
+              Populated automatically from process port allocation.
+
+              Only used when type = "process".
+            '';
+          };
+
+          listen = lib.mkOption {
+            type = types.listOf listenType;
+            default = [ ];
+            description = ''
+              Socket activation configuration for systemd-style socket passing.
+
+              Only used when type = "process".
+            '';
+            example = [
+              {
+                name = "http";
+                kind = "tcp";
+                address = "127.0.0.1:8080";
+              }
+              {
+                name = "admin";
+                kind = "unix_stream";
+                path = "$DEVENV_STATE/admin.sock";
+                mode = 384; # 0o600
+              }
+            ];
+          };
+
+          watchdog = lib.mkOption {
+            type = types.nullOr (types.submodule {
+              options = {
+                usec = lib.mkOption {
+                  type = types.int;
+                  description = "Watchdog interval in microseconds";
+                };
+
+                require_ready = lib.mkOption {
+                  type = types.bool;
+                  default = true;
+                  description = "Require READY=1 notification before enforcing watchdog";
+                };
+              };
+            });
+            default = null;
+            description = ''
+              Systemd watchdog configuration.
+
+              Only used when type = "process".
+            '';
+            example = lib.literalExpression ''
+              {
+                usec = 30000000; # 30 seconds
+                require_ready = true;
+              }
+            '';
+          };
+
+          watch = lib.mkOption {
+            type = types.submodule {
+              options = {
+                paths = lib.mkOption {
+                  type = types.listOf types.path;
+                  default = [ ];
+                  description = ''
+                    Paths to watch for changes (files or directories).
+                    When files in these paths change, the process will be restarted.
+
+                    Only used when type = "process".
+                  '';
+                };
+
+                extensions = lib.mkOption {
+                  type = types.listOf types.str;
+                  default = [ ];
+                  description = ''
+                    File extensions to watch (e.g., "rs", "js", "py").
+                    If empty, all file extensions are watched.
+
+                    Only used when type = "process".
+                  '';
+                };
+
+                ignore = lib.mkOption {
+                  type = types.listOf types.str;
+                  default = [ ];
+                  description = ''
+                    Glob patterns to ignore (e.g., ".git", "target", "*.log").
+
+                    Only used when type = "process".
+                  '';
+                };
+              };
+            };
+            default = { };
+            description = ''
+              File watching configuration for automatic process restarts.
+
+              Only used when type = "process".
+            '';
+          };
+
         };
       });
   tasksJSON = (lib.mapAttrsToList (name: value: { inherit name; } // value.config) config.tasks);
@@ -168,9 +356,15 @@ in
       description = "The generated tasks.json file.";
     };
     task.package = lib.mkOption {
-      type = types.package;
+      type = types.nullOr types.package;
       internal = true;
-      default = lib.getBin devenv-tasks;
+      # CLI 2.0+ runs tasks via Rust, so devenv-tasks binary is not needed for shell entry.
+      # However, processes still need the binary for task-based process management.
+      # When cli.version is null (flakes integration), always use the binary.
+      default =
+        if config.devenv.cli.version != null && lib.versionAtLeast config.devenv.cli.version "2.0" && config.processes == { }
+        then null
+        else lib.getBin devenv-tasks;
     };
   };
 
@@ -200,22 +394,34 @@ in
         description = "Runs when entering the shell";
         exec = ''
           mkdir -p "$DEVENV_DOTFILE" || { echo "Failed to create $DEVENV_DOTFILE"; exit 1; }
+          # Remove first in case file is owned by another user (chmod would fail otherwise)
+          rm -f "$DEVENV_DOTFILE/load-exports" 2>/dev/null || true
           echo "$DEVENV_TASK_ENV" > "$DEVENV_DOTFILE/load-exports"
           chmod +x "$DEVENV_DOTFILE/load-exports"
         '';
       };
       "devenv:enterTest" = {
         description = "Runs when entering the test environment";
+        after = [ "devenv:enterShell" ];
       };
     };
-    enterShell = ''
-      ${config.task.package}/bin/devenv-tasks run devenv:enterShell --mode all
+    # In devenv 2.0+, Rust runs enterShell tasks before shell spawns (with TUI progress).
+    # When cli.version is null (flakes integration) or pre-2.0, run tasks via bash hook.
+    enterShell = lib.mkIf (config.devenv.cli.version == null || lib.versionOlder config.devenv.cli.version "2.0") ''
+      if [ -z "''${DEVENV_SKIP_TASKS:-}" ]; then
+        ${config.task.package}/bin/devenv-tasks run devenv:enterShell --mode all --cache-dir ${lib.escapeShellArg config.devenv.dotfile} --runtime-dir ${lib.escapeShellArg config.devenv.runtime} || exit $?
+        if [ -f "$DEVENV_DOTFILE/load-exports" ]; then
+          source "$DEVENV_DOTFILE/load-exports"
+        fi
+      fi
+    '';
+    # In devenv 2.0+, Rust runs enterTest tasks (with TUI progress).
+    # When cli.version is null (flakes integration) or pre-2.0, run tasks via bash hook.
+    enterTest = lib.mkIf (config.devenv.cli.version == null || lib.versionOlder config.devenv.cli.version "2.0") (lib.mkBefore ''
+      ${config.task.package}/bin/devenv-tasks run devenv:enterTest --mode all --cache-dir ${lib.escapeShellArg config.devenv.dotfile} --runtime-dir ${lib.escapeShellArg config.devenv.runtime} || exit $?
       if [ -f "$DEVENV_DOTFILE/load-exports" ]; then
         source "$DEVENV_DOTFILE/load-exports"
       fi
-    '';
-    enterTest = ''
-      ${config.task.package}/bin/devenv-tasks run devenv:enterTest --mode all
-    '';
+    '');
   };
 }

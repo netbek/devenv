@@ -6,10 +6,13 @@ license.workspace = true
 
 [dependencies]
 blake3.workspace = true
+devenv-activity.workspace = true
+devenv-cache-core.workspace = true
+devenv-core.workspace = true
+ser_nix.workspace = true
 futures.workspace = true
-lazy_static.workspace = true
 miette.workspace = true
-regex.workspace = true
+num_enum.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_repr.workspace = true
@@ -17,7 +20,6 @@ sqlx.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-devenv-cache-core.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

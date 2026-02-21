@@ -8,7 +8,11 @@
   };
 
   config.lib = {
-    getInput = { name, url, attribute, follows ? [ ] }:
+    # Priority 500: between mkDefault (1000) and actual default (100)
+    mkOverrideDefault = lib.mkOverride 500;
+    # Internal function to format input requirement messages.
+    # Underscore prefix signals this is not part of the public API.
+    _mkInputError = { name, url, attribute, follows ? [ ] }:
       let
         flags = lib.concatStringsSep " " (map (i: "--follows ${i}") follows);
         yaml_follows = lib.concatStringsSep "\n      " (map (i: "${i}:\n        follows: ${i}") follows);
@@ -18,11 +22,11 @@
             Add the following to flake.nix:
 
             inputs.${name}.url = "${url}";
-            ${if follows != [] 
-              then "inputs.${name}.inputs = { ${lib.concatStringsSep "; " (map (i: "${i}.follows = \"${i}\"") follows)}; };" 
+            ${if follows != []
+              then "inputs.${name}.inputs = { ${lib.concatStringsSep "; " (map (i: "${i}.follows = \"${i}\"") follows)}; };"
               else ""}
           ''
-          else if lib.versionAtLeast config.devenv.cliVersion "1.0"
+          else if config.devenv.cli.version != null && lib.versionAtLeast config.devenv.cli.version "1.0"
           then ''
             run the following command:
 
@@ -30,7 +34,7 @@
           ''
           else ''
             add the following to your devenv.yaml:
-          
+
               ✨ devenv 1.0 made this easier: https://devenv.sh/getting-started/#installation ✨
 
               inputs:
@@ -39,7 +43,13 @@
                   ${if follows != [] then "inputs:\n      ${yaml_follows}" else ""}
           '';
       in
-        inputs.${name} or (throw "To use '${attribute}', ${command}\n\n");
+      "To use '${attribute}', ${command}";
+
+    getInput = args:
+      inputs.${args.name} or (throw "${config.lib._mkInputError args}\n\n");
+
+    tryGetInput = { name, url, attribute, follows ? [ ] }:
+      inputs.${name} or null;
 
     mkTests = folder:
       let
